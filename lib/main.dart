@@ -1,8 +1,46 @@
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+
+import 'firebase_options.dart';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  runApp(const BillSplitterApp());
+}
+
+bool _googleReady = false;
+
+Future<UserCredential> signInWithGoogle() async {
+  if (kIsWeb) {
+    return await FirebaseAuth.instance.signInWithPopup(GoogleAuthProvider());
+  }
+
+  if (!_googleReady) {
+    await GoogleSignIn.instance.initialize();
+    _googleReady = true;
+  }
+  final account = await GoogleSignIn.instance.authenticate();
+  final credential = GoogleAuthProvider.credential(
+    idToken: account.authentication.idToken,
+  );
+  return await FirebaseAuth.instance.signInWithCredential(credential);
+}
+
+Future<void> signOut() async {
+  if (!kIsWeb) await GoogleSignIn.instance.signOut();
+  await FirebaseAuth.instance.signOut();
+}
 
 // ============================================================
 //  Helpers
@@ -26,8 +64,8 @@ String newId() => DateTime.now().microsecondsSinceEpoch.toString();
 String _plain(double v) =>
     v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
-Map<String, double> _dmap(dynamic m) => (m as Map)
-    .map((k, v) => MapEntry(k as String, (v as num).toDouble()));
+Map<String, double> _dmap(dynamic m) =>
+    (m as Map).map((k, v) => MapEntry(k as String, (v as num).toDouble()));
 
 // ============================================================
 //  Models
@@ -57,7 +95,8 @@ class Expense {
   final DateTime date;
   final Map<String, double> payers; // member -> amount paid
   final SplitMode mode;
-  final Map<String, double> weights; // member -> weight (1 / amount / % / shares)
+  final Map<String, double>
+  weights; // member -> weight (1 / amount / % / shares)
 
   Expense({
     required this.id,
@@ -81,24 +120,24 @@ class Expense {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'category': category,
-        'date': date.toIso8601String(),
-        'payers': payers,
-        'mode': mode.name,
-        'weights': weights,
-      };
+    'id': id,
+    'title': title,
+    'category': category,
+    'date': date.toIso8601String(),
+    'payers': payers,
+    'mode': mode.name,
+    'weights': weights,
+  };
 
   factory Expense.fromJson(Map<String, dynamic> j) => Expense(
-        id: j['id'] as String,
-        title: j['title'] as String,
-        category: j['category'] as String,
-        date: DateTime.parse(j['date'] as String),
-        payers: _dmap(j['payers']),
-        mode: SplitMode.values.byName(j['mode'] as String),
-        weights: _dmap(j['weights']),
-      );
+    id: j['id'] as String,
+    title: j['title'] as String,
+    category: j['category'] as String,
+    date: DateTime.parse(j['date'] as String),
+    payers: _dmap(j['payers']),
+    mode: SplitMode.values.byName(j['mode'] as String),
+    weights: _dmap(j['weights']),
+  );
 }
 
 class Payment {
@@ -117,20 +156,20 @@ class Payment {
   });
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'from': from,
-        'to': to,
-        'amount': amount,
-        'date': date.toIso8601String(),
-      };
+    'id': id,
+    'from': from,
+    'to': to,
+    'amount': amount,
+    'date': date.toIso8601String(),
+  };
 
   factory Payment.fromJson(Map<String, dynamic> j) => Payment(
-        id: j['id'] as String,
-        from: j['from'] as String,
-        to: j['to'] as String,
-        amount: (j['amount'] as num).toDouble(),
-        date: DateTime.parse(j['date'] as String),
-      );
+    id: j['id'] as String,
+    from: j['from'] as String,
+    to: j['to'] as String,
+    amount: (j['amount'] as num).toDouble(),
+    date: DateTime.parse(j['date'] as String),
+  );
 }
 
 class Transfer {
@@ -159,9 +198,9 @@ class Group {
     List<String>? members,
     List<Expense>? expenses,
     List<Payment>? payments,
-  })  : members = members ?? [],
-        expenses = expenses ?? [],
-        payments = payments ?? [];
+  }) : members = members ?? [],
+       expenses = expenses ?? [],
+       payments = payments ?? [];
 
   factory Group.create(String name) => Group(id: newId(), name: name);
 
@@ -238,33 +277,35 @@ class Group {
     String q(String s) => '"${s.replaceAll('"', '""')}"';
     final sb = StringBuffer('Date,Title,Category,Total,Paid by,Split mode\n');
     for (final e in expenses) {
-      final payers =
-          e.payers.entries.map((p) => '${p.key} ${p.value.toStringAsFixed(2)}');
+      final payers = e.payers.entries.map(
+        (p) => '${p.key} ${p.value.toStringAsFixed(2)}',
+      );
       sb.writeln(
-          '${fmtDate(e.date)},${q(e.title)},${e.category},${e.total.toStringAsFixed(2)},${q(payers.join('; '))},${e.mode.label}');
+        '${fmtDate(e.date)},${q(e.title)},${e.category},${e.total.toStringAsFixed(2)},${q(payers.join('; '))},${e.mode.label}',
+      );
     }
     return sb.toString();
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'members': members,
-        'expenses': expenses.map((e) => e.toJson()).toList(),
-        'payments': payments.map((p) => p.toJson()).toList(),
-      };
+    'id': id,
+    'name': name,
+    'members': members,
+    'expenses': expenses.map((e) => e.toJson()).toList(),
+    'payments': payments.map((p) => p.toJson()).toList(),
+  };
 
   factory Group.fromJson(Map<String, dynamic> j) => Group(
-        id: j['id'] as String,
-        name: j['name'] as String,
-        members: (j['members'] as List).cast<String>().toList(),
-        expenses: (j['expenses'] as List)
-            .map((e) => Expense.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        payments: (j['payments'] as List)
-            .map((e) => Payment.fromJson(e as Map<String, dynamic>))
-            .toList(),
-      );
+    id: j['id'] as String,
+    name: j['name'] as String,
+    members: (j['members'] as List).cast<String>().toList(),
+    expenses: (j['expenses'] as List)
+        .map((e) => Expense.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    payments: (j['payments'] as List)
+        .map((e) => Payment.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
 }
 
 // ============================================================
@@ -332,10 +373,6 @@ final AppStore store = AppStore();
 //  App
 // ============================================================
 
-void main() {
-  runApp(const BillSplitterApp());
-}
-
 class BillSplitterApp extends StatefulWidget {
   const BillSplitterApp({super.key});
 
@@ -365,14 +402,98 @@ class _BillSplitterAppState extends State<BillSplitterApp> {
           ),
           darkTheme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
-                seedColor: Colors.teal, brightness: Brightness.dark),
+              seedColor: Colors.teal,
+              brightness: Brightness.dark,
+            ),
             useMaterial3: true,
           ),
           home: store.loaded
-              ? const HomeScreen()
-              : const Scaffold(body: Center(child: CircularProgressIndicator())),
+              ? const AuthGate(child: HomeScreen())
+              : const Scaffold(
+                  body: Center(child: CircularProgressIndicator()),
+                ),
         );
       },
+    );
+  }
+}
+
+// ============================================================
+//  Google sign-in
+// ============================================================
+
+class AuthGate extends StatelessWidget {
+  final Widget child;
+  const AuthGate({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (snapshot.hasData) return child;
+        return const LoginPage();
+      },
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  bool _busy = false;
+
+  Future<void> _signIn() async {
+    setState(() => _busy = true);
+    try {
+      await signInWithGoogle();
+    } on FirebaseAuthException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(
+            SnackBar(content: Text(e.message ?? 'Sign-in failed')),
+          );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
+            const SizedBox(height: 12),
+            const Text(
+              'Splitwise Pro',
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 24),
+            _busy
+                ? const CircularProgressIndicator()
+                : FilledButton.icon(
+                    icon: const Icon(Icons.login),
+                    label: const Text('Sign in with Google'),
+                    onPressed: _signIn,
+                  ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -414,11 +535,13 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, c.text.trim()),
-              child: const Text('OK')),
+            onPressed: () => Navigator.pop(ctx, c.text.trim()),
+            child: const Text('OK'),
+          ),
         ],
       ),
     );
@@ -455,11 +578,13 @@ class _HomeScreenState extends State<HomeScreen>
         content: const Text('All its expenses and payments will be removed.'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Delete')),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
         ],
       ),
     );
@@ -490,9 +615,10 @@ class _HomeScreenState extends State<HomeScreen>
                 dropdownColor: Colors.teal.shade700,
                 iconEnabledColor: Colors.white,
                 style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600),
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
                 items: [
                   for (final g in store.groups)
                     DropdownMenuItem(value: g.id, child: Text(g.name)),
@@ -506,6 +632,11 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
             actions: [
+              IconButton(
+                tooltip: 'Sign out',
+                icon: const Icon(Icons.logout),
+                onPressed: () => signOut(),
+              ),
               IconButton(
                 tooltip: store.dark ? 'Light mode' : 'Dark mode',
                 icon: Icon(store.dark ? Icons.light_mode : Icons.dark_mode),
@@ -626,9 +757,13 @@ class _ExpenseFormState extends State<ExpenseForm>
       _date = e.date;
       _mode = e.mode;
       e.payers.forEach(
-          (k, v) => _payers[k] = TextEditingController(text: _plain(v)));
-      e.weights.forEach((k, v) => _parts[k] = TextEditingController(
-          text: e.mode == SplitMode.equal ? '' : _plain(v)));
+        (k, v) => _payers[k] = TextEditingController(text: _plain(v)),
+      );
+      e.weights.forEach(
+        (k, v) => _parts[k] = TextEditingController(
+          text: e.mode == SplitMode.equal ? '' : _plain(v),
+        ),
+      );
     });
   }
 
@@ -650,8 +785,10 @@ class _ExpenseFormState extends State<ExpenseForm>
 
   void _removeMember(String m) {
     final g = store.current;
-    final used = g.expenses
-            .any((e) => e.payers.containsKey(m) || e.weights.containsKey(m)) ||
+    final used =
+        g.expenses.any(
+          (e) => e.payers.containsKey(m) || e.weights.containsKey(m),
+        ) ||
         g.payments.any((p) => p.from == m || p.to == m);
     if (used) {
       _snack('$m is used in saved expenses or payments, so can\'t be removed.');
@@ -717,11 +854,15 @@ class _ExpenseFormState extends State<ExpenseForm>
     }
     final wsum = weights.values.fold(0.0, (s, v) => s + v);
     if (_mode == SplitMode.percent && (wsum - 100).abs() > 0.01) {
-      _snack('Percentages add up to ${wsum.toStringAsFixed(1)}%, they must total 100%.');
+      _snack(
+        'Percentages add up to ${wsum.toStringAsFixed(1)}%, they must total 100%.',
+      );
       return;
     }
     if (_mode == SplitMode.exact && wsum > total + 0.01) {
-      _snack('Itemised amounts (${rs(wsum)}) are more than the total paid (${rs(total)}).');
+      _snack(
+        'Itemised amounts (${rs(wsum)}) are more than the total paid (${rs(total)}).',
+      );
       return;
     }
 
@@ -760,8 +901,10 @@ class _ExpenseFormState extends State<ExpenseForm>
           ? 'Each of ${_parts.length} pays ${rs(total / _parts.length)}'
           : 'Each of ${_parts.length} pays an equal share';
     } else {
-      final sum =
-          _parts.values.fold(0.0, (s, c) => s + (parseNum(c.text) ?? 0));
+      final sum = _parts.values.fold(
+        0.0,
+        (s, c) => s + (parseNum(c.text) ?? 0),
+      );
       if (_mode == SplitMode.percent) {
         text = 'Percent total: ${sum.toStringAsFixed(1)}% of 100%';
       } else if (_mode == SplitMode.exact) {
@@ -776,10 +919,13 @@ class _ExpenseFormState extends State<ExpenseForm>
     }
     return Padding(
       padding: const EdgeInsets.only(top: 6),
-      child: Text(text,
-          style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: Theme.of(context).colorScheme.primary)),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontWeight: FontWeight.w600,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      ),
     );
   }
 
@@ -802,9 +948,12 @@ class _ExpenseFormState extends State<ExpenseForm>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Group members',
-                    style: theme.textTheme.titleSmall
-                        ?.copyWith(fontWeight: FontWeight.bold)),
+                Text(
+                  'Group members',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
                 const SizedBox(height: 8),
                 if (g.members.isEmpty)
                   const Text('Add the people in this group first.'),
@@ -832,7 +981,10 @@ class _ExpenseFormState extends State<ExpenseForm>
                       ),
                     ),
                     const SizedBox(width: 8),
-                    FilledButton(onPressed: _addMember, child: const Text('Add')),
+                    FilledButton(
+                      onPressed: _addMember,
+                      child: const Text('Add'),
+                    ),
                   ],
                 ),
               ],
@@ -848,7 +1000,10 @@ class _ExpenseFormState extends State<ExpenseForm>
             child: ListTile(
               leading: const Icon(Icons.edit),
               title: const Text('Editing an expense'),
-              trailing: TextButton(onPressed: reset, child: const Text('Cancel')),
+              trailing: TextButton(
+                onPressed: reset,
+                child: const Text('Cancel'),
+              ),
             ),
           ),
 
@@ -886,9 +1041,12 @@ class _ExpenseFormState extends State<ExpenseForm>
         const Divider(height: 32),
 
         // ---- Who paid ----
-        Text('Who paid?',
-            style: theme.textTheme.titleSmall
-                ?.copyWith(fontWeight: FontWeight.bold)),
+        Text(
+          'Who paid?',
+          style: theme.textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         const SizedBox(height: 6),
         if (g.members.isEmpty) const Text('Add members above to continue.'),
         Wrap(
@@ -915,13 +1073,19 @@ class _ExpenseFormState extends State<ExpenseForm>
             padding: const EdgeInsets.only(bottom: 8),
             child: Row(
               children: [
-                Expanded(child: Text('${e.key} paid', style: const TextStyle(fontSize: 15))),
+                Expanded(
+                  child: Text(
+                    '${e.key} paid',
+                    style: const TextStyle(fontSize: 15),
+                  ),
+                ),
                 SizedBox(
                   width: 160,
                   child: TextField(
                     controller: e.value,
-                    keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
                     onChanged: (_) => setState(() {}),
                     decoration: const InputDecoration(
                       labelText: 'Amount (Rs.)',
@@ -934,18 +1098,25 @@ class _ExpenseFormState extends State<ExpenseForm>
             ),
           ),
         if (_payers.isNotEmpty)
-          Text('Expense total: ${rs(_draftTotal)}',
-              style: TextStyle(
-                  fontWeight: FontWeight.bold, color: theme.colorScheme.primary)),
+          Text(
+            'Expense total: ${rs(_draftTotal)}',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: theme.colorScheme.primary,
+            ),
+          ),
         const Divider(height: 32),
 
         // ---- Who shares ----
         Row(
           children: [
             Expanded(
-              child: Text('Who shares it?',
-                  style: theme.textTheme.titleSmall
-                      ?.copyWith(fontWeight: FontWeight.bold)),
+              child: Text(
+                'Who shares it?',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
             TextButton(
               onPressed: () => setState(() {
@@ -992,20 +1163,23 @@ class _ExpenseFormState extends State<ExpenseForm>
               padding: const EdgeInsets.only(bottom: 8),
               child: Row(
                 children: [
-                  Expanded(child: Text(e.key, style: const TextStyle(fontSize: 15))),
+                  Expanded(
+                    child: Text(e.key, style: const TextStyle(fontSize: 15)),
+                  ),
                   SizedBox(
                     width: 160,
                     child: TextField(
                       controller: e.value,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
                       onChanged: (_) => setState(() {}),
                       decoration: InputDecoration(
                         labelText: _mode == SplitMode.exact
                             ? 'Amount (Rs.)'
                             : _mode == SplitMode.percent
-                                ? 'Percent (%)'
-                                : 'Shares',
+                            ? 'Percent (%)'
+                            : 'Shares',
                         border: const OutlineInputBorder(),
                         isDense: true,
                       ),
@@ -1019,10 +1193,14 @@ class _ExpenseFormState extends State<ExpenseForm>
 
         FilledButton.icon(
           onPressed: _save,
-          style: FilledButton.styleFrom(minimumSize: const Size(double.infinity, 48)),
+          style: FilledButton.styleFrom(
+            minimumSize: const Size(double.infinity, 48),
+          ),
           icon: Icon(_editingId != null ? Icons.save : Icons.add),
           label: Text(
-            _editingId != null ? 'Save changes' : 'Add Expense & Calculate Owed',
+            _editingId != null
+                ? 'Save changes'
+                : 'Add Expense & Calculate Owed',
             style: const TextStyle(fontSize: 16),
           ),
         ),
@@ -1052,16 +1230,18 @@ class _HistoryTabState extends State<HistoryTab> {
     store.changed();
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-        content: Text('Deleted "${removed.title}"'),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () {
-            g.expenses.insert(min(index, g.expenses.length), removed);
-            store.changed();
-          },
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Deleted "${removed.title}"'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () {
+              g.expenses.insert(min(index, g.expenses.length), removed);
+              store.changed();
+            },
+          ),
         ),
-      ));
+      );
   }
 
   void _deletePayment(Group g, int index) {
@@ -1069,16 +1249,18 @@ class _HistoryTabState extends State<HistoryTab> {
     store.changed();
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
-      ..showSnackBar(SnackBar(
-        content: const Text('Payment removed'),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () {
-            g.payments.insert(min(index, g.payments.length), removed);
-            store.changed();
-          },
+      ..showSnackBar(
+        SnackBar(
+          content: const Text('Payment removed'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () {
+              g.payments.insert(min(index, g.payments.length), removed);
+              store.changed();
+            },
+          ),
         ),
-      ));
+      );
   }
 
   Widget _expenseCard(Group g, int index) {
@@ -1100,9 +1282,10 @@ class _HistoryTabState extends State<HistoryTab> {
                   child: Text(
                     '${e.title} - ${rs(e.total)}',
                     style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.primary),
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.primary,
+                    ),
                   ),
                 ),
                 IconButton(
@@ -1117,8 +1300,10 @@ class _HistoryTabState extends State<HistoryTab> {
                 ),
               ],
             ),
-            Text('${e.category}  •  ${fmtDate(e.date)}  •  split: ${e.mode.label}',
-                style: theme.textTheme.bodySmall),
+            Text(
+              '${e.category}  •  ${fmtDate(e.date)}  •  split: ${e.mode.label}',
+              style: theme.textTheme.bodySmall,
+            ),
             const SizedBox(height: 4),
             Text(
               'Paid by: ${e.payers.entries.map((p) => '${p.key} (${rs(p.value)})').join(', ')}',
@@ -1126,23 +1311,25 @@ class _HistoryTabState extends State<HistoryTab> {
             ),
             const Divider(height: 14),
             for (final p in people)
-              Builder(builder: (_) {
-                final paid = e.payers[p] ?? 0.0;
-                final share = shares[p] ?? 0.0;
-                final net = paid - share;
-                final result = net > 0.005
-                    ? 'gets back ${rs(net)}'
-                    : net < -0.005
-                        ? 'owes ${rs(-net)}'
-                        : 'is even';
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Text(
-                    '👉 $p: paid ${rs(paid)}, share ${rs(share)} → $result',
-                    style: const TextStyle(fontSize: 14),
-                  ),
-                );
-              }),
+              Builder(
+                builder: (_) {
+                  final paid = e.payers[p] ?? 0.0;
+                  final share = shares[p] ?? 0.0;
+                  final net = paid - share;
+                  final result = net > 0.005
+                      ? 'gets back ${rs(net)}'
+                      : net < -0.005
+                      ? 'owes ${rs(-net)}'
+                      : 'is even';
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Text(
+                      '👉 $p: paid ${rs(paid)}, share ${rs(share)} → $result',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  );
+                },
+              ),
           ],
         ),
       ),
@@ -1183,8 +1370,10 @@ class _HistoryTabState extends State<HistoryTab> {
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 40),
             child: Center(
-              child: Text('No expenses added yet. Add one in the Add tab!',
-                  style: TextStyle(color: Colors.grey)),
+              child: Text(
+                'No expenses added yet. Add one in the Add tab!',
+                style: TextStyle(color: Colors.grey),
+              ),
             ),
           ),
         for (int i = 0; i < g.expenses.length; i++)
@@ -1192,14 +1381,17 @@ class _HistoryTabState extends State<HistoryTab> {
             _expenseCard(g, i),
         if (g.payments.isNotEmpty) ...[
           const SizedBox(height: 16),
-          const Text('Payments recorded',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const Text(
+            'Payments recorded',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
           for (int i = 0; i < g.payments.length; i++)
             Card(
               child: ListTile(
                 leading: const Icon(Icons.payments_outlined),
                 title: Text(
-                    '${g.payments[i].from} paid ${g.payments[i].to}: ${rs(g.payments[i].amount)}'),
+                  '${g.payments[i].from} paid ${g.payments[i].to}: ${rs(g.payments[i].amount)}',
+                ),
                 subtitle: Text(fmtDate(g.payments[i].date)),
                 trailing: IconButton(
                   tooltip: 'Remove',
@@ -1228,6 +1420,79 @@ class BalancesTab extends StatelessWidget {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  void _addPayment(Group g, String from, String to, double amount) {
+    g.payments.insert(
+      0,
+      Payment(
+        id: newId(),
+        from: from,
+        to: to,
+        amount: amount,
+        date: DateTime.now(),
+      ),
+    );
+    store.changed();
+  }
+
+  // Lets the payer enter how much they actually paid now.
+  // The rest stays in the settle-up list until it is paid.
+  Future<void> _partialPayment(
+    BuildContext context,
+    Group g,
+    Transfer t,
+  ) async {
+    final c = TextEditingController();
+    final amount = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${t.from} pays ${t.to}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Still owed: ${rs(t.amount)}'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: c,
+              autofocus: true,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'Amount paid now (Rs.)',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (v) => Navigator.pop(ctx, parseNum(v)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, parseNum(c.text)),
+            child: const Text('Record'),
+          ),
+        ],
+      ),
+    );
+    if (amount == null) return;
+    if (!context.mounted) return;
+    if (amount <= 0 || amount > t.amount + 0.01) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('Enter an amount between 0 and ${rs(t.amount)}.'),
+          ),
+        );
+      return;
+    }
+    _addPayment(g, t.from, t.to, min(amount, t.amount));
+  }
+
   @override
   Widget build(BuildContext context) {
     final g = store.current;
@@ -1251,16 +1516,22 @@ class BalancesTab extends StatelessWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Total Expenses:',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.onPrimaryContainer)),
-                Text(rs(total),
-                    style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.onPrimaryContainer)),
+                Text(
+                  'Total Expenses:',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onPrimaryContainer,
+                  ),
+                ),
+                Text(
+                  rs(total),
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onPrimaryContainer,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1268,14 +1539,18 @@ class BalancesTab extends StatelessWidget {
         const SizedBox(height: 16),
 
         // ---- Per-person balances ----
-        const Text('Balance per person',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const Text(
+          'Balance per person',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
         const SizedBox(height: 4),
         if (balances.isEmpty)
           const Padding(
             padding: EdgeInsets.all(12),
-            child: Text('Add members and expenses to see balances.',
-                style: TextStyle(color: Colors.grey)),
+            child: Text(
+              'Add members and expenses to see balances.',
+              style: TextStyle(color: Colors.grey),
+            ),
           ),
         for (final b in balances)
           Card(
@@ -1287,15 +1562,15 @@ class BalancesTab extends StatelessWidget {
                 b.value.abs() < 0.01
                     ? 'settled'
                     : b.value > 0
-                        ? '+${rs(b.value)}'
-                        : '-${rs(-b.value)}',
+                    ? '+${rs(b.value)}'
+                    : '-${rs(-b.value)}',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   color: b.value.abs() < 0.01
                       ? null
                       : b.value > 0
-                          ? Colors.green.shade600
-                          : Colors.red.shade400,
+                      ? Colors.green.shade600
+                      : Colors.red.shade400,
                 ),
               ),
             ),
@@ -1311,44 +1586,49 @@ class BalancesTab extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Settle up (fewest payments)',
-                    style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.onSecondaryContainer)),
+                Text(
+                  'Settle up (fewest payments)',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onSecondaryContainer,
+                  ),
+                ),
                 const SizedBox(height: 8),
                 if (transfers.isEmpty)
-                  Text('Everyone is settled up. 🎉',
-                      style: TextStyle(color: theme.colorScheme.onSecondaryContainer))
+                  Text(
+                    'Everyone is settled up. 🎉',
+                    style: TextStyle(
+                      color: theme.colorScheme.onSecondaryContainer,
+                    ),
+                  )
                 else
                   for (final t in transfers)
                     Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Row(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Expanded(
-                            child: Text(
-                              '💸 ${t.from} pays ${t.to}: ${rs(t.amount)}',
-                              style: TextStyle(
-                                  fontSize: 15,
-                                  color: theme.colorScheme.onSecondaryContainer),
+                          Text(
+                            '💸 ${t.from} pays ${t.to}: ${rs(t.amount)}',
+                            style: TextStyle(
+                              fontSize: 15,
+                              color: theme.colorScheme.onSecondaryContainer,
                             ),
                           ),
-                          TextButton(
-                            onPressed: () {
-                              g.payments.insert(
-                                0,
-                                Payment(
-                                  id: newId(),
-                                  from: t.from,
-                                  to: t.to,
-                                  amount: t.amount,
-                                  date: DateTime.now(),
-                                ),
-                              );
-                              store.changed();
-                            },
-                            child: const Text('Mark paid'),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              TextButton(
+                                onPressed: () =>
+                                    _addPayment(g, t.from, t.to, t.amount),
+                                child: const Text('Paid in full'),
+                              ),
+                              TextButton(
+                                onPressed: () => _partialPayment(context, g, t),
+                                child: const Text('Partial payment'),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -1358,16 +1638,22 @@ class BalancesTab extends StatelessWidget {
                   spacing: 8,
                   children: [
                     OutlinedButton.icon(
-                      onPressed: () => _copy(context, g.summaryText(),
-                          'Summary copied. Paste it into WhatsApp.'),
+                      onPressed: () => _copy(
+                        context,
+                        g.summaryText(),
+                        'Summary copied. Paste it into WhatsApp.',
+                      ),
                       icon: const Icon(Icons.copy),
                       label: const Text('Copy summary'),
                     ),
                     OutlinedButton.icon(
                       onPressed: g.expenses.isEmpty
                           ? null
-                          : () => _copy(context, g.csv(),
-                              'CSV copied. Paste it into Excel or Sheets.'),
+                          : () => _copy(
+                              context,
+                              g.csv(),
+                              'CSV copied. Paste it into Excel or Sheets.',
+                            ),
                       icon: const Icon(Icons.table_chart_outlined),
                       label: const Text('Copy CSV'),
                     ),
@@ -1381,8 +1667,10 @@ class BalancesTab extends StatelessWidget {
 
         // ---- Spending by category ----
         if (cats.isNotEmpty) ...[
-          const Text('Spending by category',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const Text(
+            'Spending by category',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 8),
           for (final c in cats)
             Padding(
@@ -1394,7 +1682,9 @@ class BalancesTab extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(c.key),
-                      Text('${rs(c.value)}  (${(c.value / total * 100).toStringAsFixed(0)}%)'),
+                      Text(
+                        '${rs(c.value)}  (${(c.value / total * 100).toStringAsFixed(0)}%)',
+                      ),
                     ],
                   ),
                   const SizedBox(height: 4),
