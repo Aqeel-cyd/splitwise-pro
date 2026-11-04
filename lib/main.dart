@@ -451,47 +451,200 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _confirm = TextEditingController();
   bool _busy = false;
+  bool _isSignUp = false;
+  bool _hidePass = true;
 
-  Future<void> _signIn() async {
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  void _msg(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  String _friendly(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-email':
+        return 'That email looks wrong';
+      case 'user-not-found':
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Wrong email or password';
+      case 'email-already-in-use':
+        return 'This email already has an account. Try logging in';
+      case 'weak-password':
+        return 'Password must be at least 6 characters';
+      case 'network-request-failed':
+        return 'No internet connection';
+      default:
+        return e.message ?? 'Sign-in failed';
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
     setState(() => _busy = true);
     try {
-      await signInWithGoogle();
+      await action();
     } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(content: Text(e.message ?? 'Sign-in failed')),
-          );
-      }
+      _msg(_friendly(e));
+    } catch (_) {
+      _msg('Something went wrong. Try again');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
+  Future<void> _submit() async {
+    final email = _email.text.trim();
+    final pass = _password.text;
+    if (email.isEmpty || pass.isEmpty) {
+      _msg('Enter your email and password');
+      return;
+    }
+    if (_isSignUp && pass != _confirm.text) {
+      _msg('Passwords do not match');
+      return;
+    }
+    await _run(() async {
+      if (_isSignUp) {
+        await FirebaseAuth.instance
+            .createUserWithEmailAndPassword(email: email, password: pass);
+      } else {
+        await FirebaseAuth.instance
+            .signInWithEmailAndPassword(email: email, password: pass);
+      }
+    });
+  }
+
+  Future<void> _forgot() async {
+    final email = _email.text.trim();
+    if (email.isEmpty) {
+      _msg('Type your email first');
+      return;
+    }
+    await _run(() async {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      _msg('Password reset email sent');
+    });
+  }
+
+  Future<void> _google() => _run(() async {
+        await signInWithGoogle();
+      });
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
-            const SizedBox(height: 12),
-            const Text(
-              'Splitwise Pro',
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 24),
-            _busy
-                ? const CircularProgressIndicator()
-                : FilledButton.icon(
-                    icon: const Icon(Icons.login),
-                    label: const Text('Sign in with Google'),
-                    onPressed: _signIn,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
+                const SizedBox(height: 12),
+                const Text(
+                  'Splitwise Pro',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 24),
+                TextField(
+                  controller: _email,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email',
+                    prefixIcon: Icon(Icons.email_outlined),
+                    border: OutlineInputBorder(),
                   ),
-          ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _password,
+                  obscureText: _hidePass,
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(_hidePass
+                          ? Icons.visibility_off
+                          : Icons.visibility),
+                      onPressed: () =>
+                          setState(() => _hidePass = !_hidePass),
+                    ),
+                  ),
+                ),
+                if (_isSignUp) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _confirm,
+                    obscureText: _hidePass,
+                    decoration: const InputDecoration(
+                      labelText: 'Confirm password',
+                      prefixIcon: Icon(Icons.lock_outline),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+                if (!_isSignUp)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: _busy ? null : _forgot,
+                      child: const Text('Forgot password?'),
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                if (_busy)
+                  const Center(child: CircularProgressIndicator())
+                else ...[
+                  FilledButton(
+                    onPressed: _submit,
+                    child: Text(_isSignUp ? 'Create account' : 'Log in'),
+                  ),
+                  const SizedBox(height: 12),
+                  const Row(
+                    children: [
+                      Expanded(child: Divider()),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Text('or'),
+                      ),
+                      Expanded(child: Divider()),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.login),
+                    label: const Text('Continue with Google'),
+                    onPressed: _google,
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () => setState(() => _isSignUp = !_isSignUp),
+                    child: Text(_isSignUp
+                        ? 'Already have an account? Log in'
+                        : "Don't have an account? Sign up"),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );
