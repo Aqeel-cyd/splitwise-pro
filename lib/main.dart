@@ -8,10 +8,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter_contacts/flutter_contacts.dart' show FlutterContacts;
 
 import 'firebase_options.dart';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,6 +57,176 @@ const List<String> categories = [
   'Bills',
   'Other',
 ];
+
+// ============================================================
+//  Moving background (changes colour when you pick something)
+// ============================================================
+
+/// The item the user picked last (a category or a member name).
+final ValueNotifier<String?> bgSelection = ValueNotifier<String?>(null);
+
+/// Goes up by one every time something is picked, to "kick" the motion.
+final ValueNotifier<int> bgKick = ValueNotifier<int>(0);
+
+const Map<String, Color> _catColors = {
+  'Food': Colors.orange,
+  'Transport': Colors.blue,
+  'Stay': Colors.purple,
+  'Shopping': Colors.pink,
+  'Entertainment': Colors.amber,
+  'Bills': Colors.red,
+  'Other': Colors.blueGrey,
+};
+
+Color bgColorFor(String? key) {
+  if (key == null) return Colors.teal;
+  final known = _catColors[key];
+  if (known != null) return known;
+  // Member names: same name always gives the same colour.
+  var h = 0;
+  for (final u in key.codeUnits) {
+    h = (h * 31 + u) & 0xFFFF;
+  }
+  return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.65, 0.5).toColor();
+}
+
+void bgPick(String? key) {
+  bgSelection.value = key;
+  bgKick.value++;
+}
+
+class AnimatedBackground extends StatefulWidget {
+  final bool dark;
+  const AnimatedBackground({super.key, required this.dark});
+
+  @override
+  State<AnimatedBackground> createState() => _AnimatedBackgroundState();
+}
+
+class _AnimatedBackgroundState extends State<AnimatedBackground>
+    with TickerProviderStateMixin {
+  // Slow loop that keeps the background floating all the time.
+  late final AnimationController _loop = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 24),
+  )..repeat();
+
+  // Extra swirl that plays each time something is picked.
+  late final AnimationController _kick = AnimationController.unbounded(
+    vsync: this,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    bgKick.addListener(_onKick);
+  }
+
+  void _onKick() {
+    _kick.animateTo(
+      _kick.value.floor() + 1.0,
+      duration: const Duration(milliseconds: 1400),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  void dispose() {
+    bgKick.removeListener(_onKick);
+    _loop.dispose();
+    _kick.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: ValueListenableBuilder<String?>(
+        valueListenable: bgSelection,
+        builder: (context, key, _) {
+          final target = bgColorFor(key);
+          return TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: target),
+            duration: const Duration(milliseconds: 900),
+            builder: (context, color, _) {
+              final c = color ?? target;
+              return AnimatedBuilder(
+                animation: Listenable.merge([_loop, _kick]),
+                builder: (context, _) => _paint(c),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _paint(Color c) {
+    final dark = widget.dark;
+    final t = _loop.value * 2 * pi;
+    final swirl = _kick.value * 2.2;
+    final f = _kick.value - _kick.value.floorToDouble();
+    final pulse = sin(f * pi); // 0 -> 1 -> 0 during a pick
+
+    final base = dark ? const Color(0xFF0E1114) : Colors.white;
+    final top = Color.lerp(base, c, dark ? 0.20 : 0.14)!;
+    final bottom = Color.lerp(base, c, dark ? 0.42 : 0.34)!;
+    final hsl = HSLColor.fromColor(c);
+
+    return LayoutBuilder(
+      builder: (context, box) {
+        final w = box.maxWidth;
+        final h = box.maxHeight;
+        final blobs = <Widget>[];
+        for (var i = 0; i < 4; i++) {
+          final phase = i * 1.7 + swirl;
+          final size = min(w, h) * (0.55 + 0.1 * i) * (1 + 0.5 * pulse);
+          final x = w * (0.5 + 0.45 * sin(t * (1 + i % 2) + phase));
+          final y = h * (0.5 + 0.45 * cos(t * (1 + (i + 1) % 2) + phase * 0.8));
+          final blob = hsl
+              .withHue((hsl.hue + 35 * i) % 360)
+              .withLightness(0.55)
+              .toColor();
+          blobs.add(
+            Positioned(
+              left: x - size / 2,
+              top: y - size / 2,
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      blob.withAlpha(dark ? 110 : 90),
+                      blob.withAlpha(0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment(-1 + 0.4 * sin(t), -1),
+                    end: Alignment(1 - 0.4 * cos(t), 1),
+                    colors: [top, bottom],
+                  ),
+                ),
+              ),
+            ),
+            ...blobs,
+          ],
+        );
+      },
+    );
+  }
+}
 
 String rs(double v) => 'Rs. ${v.toStringAsFixed(2)}';
 String _two(int n) => n.toString().padLeft(2, '0');
@@ -451,47 +623,200 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _confirm = TextEditingController();
   bool _busy = false;
+  bool _isSignUp = false;
+  bool _hidePass = true;
 
-  Future<void> _signIn() async {
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  void _msg(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  String _friendly(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-email':
+        return 'That email looks wrong';
+      case 'user-not-found':
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Wrong email or password';
+      case 'email-already-in-use':
+        return 'This email already has an account. Try logging in';
+      case 'weak-password':
+        return 'Password must be at least 6 characters';
+      case 'network-request-failed':
+        return 'No internet connection';
+      default:
+        return e.message ?? 'Sign-in failed';
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
     setState(() => _busy = true);
     try {
-      await signInWithGoogle();
+      await action();
     } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(content: Text(e.message ?? 'Sign-in failed')),
-          );
-      }
+      _msg(_friendly(e));
+    } catch (_) {
+      _msg('Something went wrong. Try again');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
+  Future<void> _submit() async {
+    final email = _email.text.trim();
+    final pass = _password.text;
+    if (email.isEmpty || pass.isEmpty) {
+      _msg('Enter your email and password');
+      return;
+    }
+    if (_isSignUp && pass != _confirm.text) {
+      _msg('Passwords do not match');
+      return;
+    }
+    await _run(() async {
+      if (_isSignUp) {
+        await FirebaseAuth.instance
+            .createUserWithEmailAndPassword(email: email, password: pass);
+      } else {
+        await FirebaseAuth.instance
+            .signInWithEmailAndPassword(email: email, password: pass);
+      }
+    });
+  }
+
+  Future<void> _forgot() async {
+    final email = _email.text.trim();
+    if (email.isEmpty) {
+      _msg('Type your email first');
+      return;
+    }
+    await _run(() async {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      _msg('Password reset email sent');
+    });
+  }
+
+  Future<void> _google() => _run(() async {
+        await signInWithGoogle();
+      });
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
-            const SizedBox(height: 12),
-            const Text(
-              'Splitwise Pro',
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 24),
-            _busy
-                ? const CircularProgressIndicator()
-                : FilledButton.icon(
-                    icon: const Icon(Icons.login),
-                    label: const Text('Sign in with Google'),
-                    onPressed: _signIn,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
+                const SizedBox(height: 12),
+                const Text(
+                  'Splitwise Pro',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 24),
+                TextField(
+                  controller: _email,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email',
+                    prefixIcon: Icon(Icons.email_outlined),
+                    border: OutlineInputBorder(),
                   ),
-          ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _password,
+                  obscureText: _hidePass,
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(_hidePass
+                          ? Icons.visibility_off
+                          : Icons.visibility),
+                      onPressed: () =>
+                          setState(() => _hidePass = !_hidePass),
+                    ),
+                  ),
+                ),
+                if (_isSignUp) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _confirm,
+                    obscureText: _hidePass,
+                    decoration: const InputDecoration(
+                      labelText: 'Confirm password',
+                      prefixIcon: Icon(Icons.lock_outline),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+                if (!_isSignUp)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: _busy ? null : _forgot,
+                      child: const Text('Forgot password?'),
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                if (_busy)
+                  const Center(child: CircularProgressIndicator())
+                else ...[
+                  FilledButton(
+                    onPressed: _submit,
+                    child: Text(_isSignUp ? 'Create account' : 'Log in'),
+                  ),
+                  const SizedBox(height: 12),
+                  const Row(
+                    children: [
+                      Expanded(child: Divider()),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Text('or'),
+                      ),
+                      Expanded(child: Divider()),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.login),
+                    label: const Text('Continue with Google'),
+                    onPressed: _google,
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () => setState(() => _isSignUp = !_isSignUp),
+                    child: Text(_isSignUp
+                        ? 'Already have an account? Log in'
+                        : "Don't have an account? Sign up"),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -605,7 +930,12 @@ class _HomeScreenState extends State<HomeScreen>
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) {
-        return Scaffold(
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            Positioned.fill(child: AnimatedBackground(dark: store.dark)),
+            Scaffold(
+          backgroundColor: Colors.transparent,
           appBar: AppBar(
             backgroundColor: Colors.teal,
             foregroundColor: Colors.white,
@@ -684,6 +1014,8 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
+        ),
+          ],
         );
       },
     );
@@ -781,6 +1113,48 @@ class _ExpenseFormState extends State<ExpenseForm>
     g.members.add(name);
     _newMember.clear();
     store.changed();
+  }
+
+  Future<void> _pickFromContacts() async {
+    final onPhone = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS);
+    if (!onPhone) {
+      _snack('Contacts work only in the phone app (Android or iPhone), not in Chrome.');
+      return;
+    }
+    try {
+      final ok = await FlutterContacts.requestPermission(readonly: true);
+      if (!ok) {
+        _snack('Contacts permission was denied. Allow it in your phone Settings.');
+        return;
+      }
+      final all = await FlutterContacts.getContacts();
+      final names = all
+          .map((c) => c.displayName.trim())
+          .where((n) => n.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      if (!mounted) return;
+      final g = store.current;
+      final picked = await showModalBottomSheet<List<String>>(
+        context: context,
+        isScrollControlled: true,
+        builder: (_) => _ContactPickerSheet(names: names, existing: g.members),
+      );
+      if (picked == null || picked.isEmpty) return;
+      var added = 0;
+      for (final n in picked) {
+        if (g.members.any((m) => m.toLowerCase() == n.toLowerCase())) continue;
+        g.members.add(n);
+        added++;
+      }
+      store.changed();
+      _snack('Added $added member(s) from contacts.');
+    } catch (_) {
+      _snack('Could not open contacts on this device.');
+    }
   }
 
   void _removeMember(String m) {
@@ -981,6 +1355,12 @@ class _ExpenseFormState extends State<ExpenseForm>
                       ),
                     ),
                     const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: 'Add from contacts',
+                      icon: const Icon(Icons.contacts),
+                      onPressed: _pickFromContacts,
+                    ),
+                    const SizedBox(width: 8),
                     FilledButton(
                       onPressed: _addMember,
                       child: const Text('Add'),
@@ -1025,7 +1405,10 @@ class _ExpenseFormState extends State<ExpenseForm>
               ChoiceChip(
                 label: Text(c),
                 selected: _category == c,
-                onSelected: (_) => setState(() => _category = c),
+                onSelected: (_) {
+                  bgPick(c);
+                  setState(() => _category = c);
+                },
               ),
           ],
         ),
@@ -1059,6 +1442,7 @@ class _ExpenseFormState extends State<ExpenseForm>
                 selected: _payers.containsKey(m),
                 onSelected: (sel) => setState(() {
                   if (sel) {
+                    bgPick(m);
                     _payers[m] = TextEditingController();
                   } else {
                     _payers.remove(m);
@@ -1138,6 +1522,7 @@ class _ExpenseFormState extends State<ExpenseForm>
                 selected: _parts.containsKey(m),
                 onSelected: (sel) => setState(() {
                   if (sel) {
+                    bgPick(m);
                     _parts[m] = TextEditingController();
                   } else {
                     _parts.remove(m);
@@ -1355,13 +1740,19 @@ class _HistoryTabState extends State<HistoryTab> {
                 ChoiceChip(
                   label: const Text('All'),
                   selected: _filter == null,
-                  onSelected: (_) => setState(() => _filter = null),
+                  onSelected: (_) {
+                    bgPick(null);
+                    setState(() => _filter = null);
+                  },
                 ),
                 for (final c in categories.where(usedCats.contains))
                   ChoiceChip(
                     label: Text(c),
                     selected: _filter == c,
-                    onSelected: (_) => setState(() => _filter = c),
+                    onSelected: (_) {
+                      bgPick(c);
+                      setState(() => _filter = c);
+                    },
                   ),
               ],
             ),
@@ -1701,6 +2092,105 @@ class BalancesTab extends StatelessWidget {
         ],
         const SizedBox(height: 24),
       ],
+    );
+  }
+}
+
+// ============================================================
+//  Pick members from the phone's contact list
+// ============================================================
+
+class _ContactPickerSheet extends StatefulWidget {
+  final List<String> names;
+  final List<String> existing;
+  const _ContactPickerSheet({required this.names, required this.existing});
+
+  @override
+  State<_ContactPickerSheet> createState() => _ContactPickerSheetState();
+}
+
+class _ContactPickerSheetState extends State<_ContactPickerSheet> {
+  final Set<String> _chosen = {};
+  String _q = '';
+
+  bool _isIn(String n) =>
+      widget.existing.any((m) => m.toLowerCase() == n.toLowerCase());
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = widget.names
+        .where((n) => n.toLowerCase().contains(_q.toLowerCase()))
+        .toList();
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.8,
+          child: Column(
+            children: [
+              const SizedBox(height: 12),
+              const Text(
+                'Pick from contacts',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: TextField(
+                  onChanged: (v) => setState(() => _q = v),
+                  decoration: const InputDecoration(
+                    labelText: 'Search',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: shown.isEmpty
+                    ? const Center(child: Text('No contacts found'))
+                    : ListView.builder(
+                        itemCount: shown.length,
+                        itemBuilder: (_, i) {
+                          final n = shown[i];
+                          final already = _isIn(n);
+                          return CheckboxListTile(
+                            title: Text(n),
+                            subtitle:
+                                already ? const Text('Already in this group') : null,
+                            value: already || _chosen.contains(n),
+                            onChanged: already
+                                ? null
+                                : (v) => setState(() {
+                                      if (v == true) {
+                                        _chosen.add(n);
+                                      } else {
+                                        _chosen.remove(n);
+                                      }
+                                    }),
+                          );
+                        },
+                      ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: _chosen.isEmpty
+                        ? null
+                        : () => Navigator.pop(context, _chosen.toList()),
+                    child: Text(
+                      _chosen.isEmpty
+                          ? 'Select contacts'
+                          : 'Add ${_chosen.length} member(s)',
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
