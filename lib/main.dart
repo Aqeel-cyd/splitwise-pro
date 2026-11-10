@@ -23,9 +23,11 @@ void main() async {
 
 bool _googleReady = false;
 
-Future<UserCredential> signInWithGoogle() async {
+Future<void> signInWithGoogle() async {
   if (kIsWeb) {
-    return await FirebaseAuth.instance.signInWithPopup(GoogleAuthProvider());
+    // Chrome: popup login (redirect login does not work reliably on localhost).
+    await FirebaseAuth.instance.signInWithPopup(GoogleAuthProvider());
+    return;
   }
 
   if (!_googleReady) {
@@ -36,7 +38,7 @@ Future<UserCredential> signInWithGoogle() async {
   final credential = GoogleAuthProvider.credential(
     idToken: account.authentication.idToken,
   );
-  return await FirebaseAuth.instance.signInWithCredential(credential);
+  await FirebaseAuth.instance.signInWithCredential(credential);
 }
 
 Future<void> signOut() async {
@@ -228,7 +230,8 @@ class _AnimatedBackgroundState extends State<AnimatedBackground>
   }
 }
 
-String rs(double v) => 'Rs. ${v.toStringAsFixed(2)}';
+const List<String> currencies = ['Rs.', '\$', '₹', '€', '£', '¥', 'AED', 'SAR'];
+String rs(double v) => '${store.currency} ${v.toStringAsFixed(2)}';
 String _two(int n) => n.toString().padLeft(2, '0');
 String fmtDate(DateTime d) => '${d.year}-${_two(d.month)}-${_two(d.day)}';
 double? parseNum(String s) => double.tryParse(s.trim().replaceAll(',', ''));
@@ -491,9 +494,40 @@ class AppStore extends ChangeNotifier {
   String? currentId;
   bool dark = false;
   bool loaded = false;
+  String currency = 'Rs.';
+  String? myName;
 
   Group get current =>
       groups.firstWhere((g) => g.id == currentId, orElse: () => groups.first);
+
+  // Every member name used in any group
+  List<String> get allMembers {
+    final set = <String>{};
+    for (final g in groups) {
+      set.addAll(g.members);
+    }
+    return set.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  }
+
+  // Which member is the signed-in user (chosen, or guessed from the account)
+  String? get me {
+    final names = allMembers;
+    if (myName != null && names.contains(myName)) return myName;
+    final u = FirebaseAuth.instance.currentUser;
+    final cands = <String>[];
+    final dn = u?.displayName?.trim() ?? '';
+    if (dn.isNotEmpty) {
+      cands.add(dn.toLowerCase());
+      cands.add(dn.split(' ').first.toLowerCase());
+    }
+    final em = u?.email ?? '';
+    if (em.contains('@')) cands.add(em.split('@').first.toLowerCase());
+    for (final m in names) {
+      if (cands.contains(m.toLowerCase())) return m;
+    }
+    return null;
+  }
 
   Future<void> load() async {
     try {
@@ -506,6 +540,8 @@ class AppStore extends ChangeNotifier {
             .toList();
         currentId = j['currentId'] as String?;
         dark = j['dark'] as bool? ?? false;
+        currency = j['currency'] as String? ?? 'Rs.';
+        myName = j['myName'] as String?;
       }
     } catch (_) {
       // Corrupt or missing data: start fresh
@@ -527,6 +563,8 @@ class AppStore extends ChangeNotifier {
           'groups': groups.map((g) => g.toJson()).toList(),
           'currentId': currentId,
           'dark': dark,
+          'currency': currency,
+          'myName': myName,
         }),
       );
     } catch (_) {}
@@ -832,8 +870,16 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
-  late final TabController _tabs = TabController(length: 3, vsync: this);
+  late final TabController _tabs = TabController(length: 5, vsync: this);
   final GlobalKey<_ExpenseFormState> _formKey = GlobalKey<_ExpenseFormState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
 
   @override
   void dispose() {
@@ -988,17 +1034,37 @@ class _HomeScreenState extends State<HomeScreen>
                 ],
               ),
             ],
-            bottom: TabBar(
-              controller: _tabs,
-              labelColor: Colors.white,
-              unselectedLabelColor: Colors.white70,
-              indicatorColor: Colors.white,
-              tabs: const [
-                Tab(icon: Icon(Icons.add_circle_outline), text: 'Add'),
-                Tab(icon: Icon(Icons.receipt_long), text: 'History'),
-                Tab(icon: Icon(Icons.account_balance_wallet), text: 'Balances'),
-              ],
-            ),
+          ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _tabs.index,
+            onDestinationSelected: (i) => _tabs.animateTo(i),
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.add_circle_outline),
+                selectedIcon: Icon(Icons.add_circle),
+                label: 'Add',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.receipt_long_outlined),
+                selectedIcon: Icon(Icons.receipt_long),
+                label: 'History',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.account_balance_wallet_outlined),
+                selectedIcon: Icon(Icons.account_balance_wallet),
+                label: 'Balances',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.people_outline),
+                selectedIcon: Icon(Icons.people),
+                label: 'Friends',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.person_outline),
+                selectedIcon: Icon(Icons.person),
+                label: 'Account',
+              ),
+            ],
           ),
           body: Align(
             alignment: Alignment.topCenter,
@@ -1010,6 +1076,8 @@ class _HomeScreenState extends State<HomeScreen>
                   ExpenseForm(key: _formKey),
                   HistoryTab(onEdit: _edit),
                   const BalancesTab(),
+                  const FriendsTab(),
+                  const AccountTab(),
                 ],
               ),
             ),
@@ -1471,9 +1539,9 @@ class _ExpenseFormState extends State<ExpenseForm>
                       decimal: true,
                     ),
                     onChanged: (_) => setState(() {}),
-                    decoration: const InputDecoration(
-                      labelText: 'Amount (Rs.)',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: 'Amount (${store.currency})',
+                      border: const OutlineInputBorder(),
                       isDense: true,
                     ),
                   ),
@@ -1561,7 +1629,7 @@ class _ExpenseFormState extends State<ExpenseForm>
                       onChanged: (_) => setState(() {}),
                       decoration: InputDecoration(
                         labelText: _mode == SplitMode.exact
-                            ? 'Amount (Rs.)'
+                            ? 'Amount (${store.currency})'
                             : _mode == SplitMode.percent
                             ? 'Percent (%)'
                             : 'Shares',
@@ -1609,6 +1677,53 @@ class HistoryTab extends StatefulWidget {
 
 class _HistoryTabState extends State<HistoryTab> {
   String? _filter; // category filter
+  String _query = '';
+  String? _person;
+  DateTimeRange? _range;
+  final TextEditingController _search = TextEditingController();
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  bool get _hasFilters =>
+      _filter != null ||
+      _person != null ||
+      _range != null ||
+      _query.trim().isNotEmpty;
+
+  bool _matches(Expense e) {
+    if (_filter != null && e.category != _filter) return false;
+    if (_person != null &&
+        !(e.payers.containsKey(_person) || e.weights.containsKey(_person))) {
+      return false;
+    }
+    if (_range != null) {
+      final d = DateTime(e.date.year, e.date.month, e.date.day);
+      if (d.isBefore(_range!.start) || d.isAfter(_range!.end)) return false;
+    }
+    final q = _query.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      final hay =
+          '${e.title} ${e.category} ${e.payers.keys.join(' ')} ${e.weights.keys.join(' ')}'
+              .toLowerCase();
+      if (!hay.contains(q)) return false;
+    }
+    return true;
+  }
+
+  Future<void> _pickRange() async {
+    final now = DateTime.now();
+    final r = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 5),
+      lastDate: DateTime(now.year + 1),
+      initialDateRange: _range,
+    );
+    if (r != null) setState(() => _range = r);
+  }
 
   void _deleteExpense(Group g, int index) {
     final removed = g.expenses.removeAt(index);
@@ -1726,10 +1841,92 @@ class _HistoryTabState extends State<HistoryTab> {
     final g = store.current;
     final usedCats = g.expenses.map((e) => e.category).toSet();
     if (_filter != null && !usedCats.contains(_filter)) _filter = null;
+    if (_person != null && !g.members.contains(_person)) _person = null;
+    final shown = g.expenses.where(_matches).toList();
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        if (g.expenses.isNotEmpty) ...[
+          TextField(
+            controller: _search,
+            onChanged: (v) => setState(() => _query = v),
+            decoration: InputDecoration(
+              hintText: 'Search by title, category or person',
+              prefixIcon: const Icon(Icons.search),
+              border: const OutlineInputBorder(),
+              isDense: true,
+              suffixIcon: _query.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _search.clear();
+                        setState(() => _query = '');
+                      },
+                    ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (g.members.isNotEmpty)
+                DropdownButton<String?>(
+                  value: _person,
+                  hint: const Text('Everyone'),
+                  underline: const SizedBox.shrink(),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('Everyone'),
+                    ),
+                    for (final m in g.members)
+                      DropdownMenuItem<String?>(value: m, child: Text(m)),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) bgPick(v);
+                    setState(() => _person = v);
+                  },
+                ),
+              OutlinedButton.icon(
+                onPressed: _pickRange,
+                icon: const Icon(Icons.date_range),
+                label: Text(
+                  _range == null
+                      ? 'Dates'
+                      : '${fmtDate(_range!.start)} to ${fmtDate(_range!.end)}',
+                ),
+              ),
+              if (_hasFilters)
+                TextButton.icon(
+                  onPressed: () {
+                    bgPick(null);
+                    _search.clear();
+                    setState(() {
+                      _filter = null;
+                      _person = null;
+                      _range = null;
+                      _query = '';
+                    });
+                  },
+                  icon: const Icon(Icons.filter_alt_off_outlined),
+                  label: const Text('Clear'),
+                ),
+            ],
+          ),
+          if (_hasFilters)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Showing ${shown.length} of ${g.expenses.length}  •  total ${rs(shown.fold<double>(0.0, (s, e) => s + e.total))}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          const SizedBox(height: 8),
+        ],
         if (usedCats.length > 1)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
@@ -1767,9 +1964,18 @@ class _HistoryTabState extends State<HistoryTab> {
               ),
             ),
           ),
+        if (g.expenses.isNotEmpty && shown.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 40),
+            child: Center(
+              child: Text(
+                'No expenses match your search or filters.',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+          ),
         for (int i = 0; i < g.expenses.length; i++)
-          if (_filter == null || g.expenses[i].category == _filter)
-            _expenseCard(g, i),
+          if (_matches(g.expenses[i])) _expenseCard(g, i),
         if (g.payments.isNotEmpty) ...[
           const SizedBox(height: 16),
           const Text(
@@ -1849,9 +2055,9 @@ class BalancesTab extends StatelessWidget {
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
-              decoration: const InputDecoration(
-                labelText: 'Amount paid now (Rs.)',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                labelText: 'Amount paid now (${store.currency})',
+                border: const OutlineInputBorder(),
               ),
               onSubmitted: (v) => Navigator.pop(ctx, parseNum(v)),
             ),
@@ -2056,39 +2262,66 @@ class BalancesTab extends StatelessWidget {
         ),
         const SizedBox(height: 16),
 
-        // ---- Spending by category ----
+        // ---- Spending by category (donut chart) ----
         if (cats.isNotEmpty) ...[
           const Text(
             'Spending by category',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
+          SizedBox(
+            height: 210,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(painter: _DonutPainter(cats, total)),
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Total', style: TextStyle(fontSize: 12)),
+                    Text(
+                      rs(total),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
           for (final c in cats)
             Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(c.key),
-                      Text(
-                        '${rs(c.value)}  (${(c.value / total * 100).toStringAsFixed(0)}%)',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: total > 0 ? c.value / total : 0,
-                      minHeight: 10,
+                  Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: bgColorFor(c.key),
+                      shape: BoxShape.circle,
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(c.key)),
+                  Text(
+                    '${rs(c.value)}  (${total > 0 ? (c.value / total * 100).toStringAsFixed(0) : 0}%)',
                   ),
                 ],
               ),
             ),
+          const SizedBox(height: 16),
+          const Text(
+            'Last 6 months',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          _MonthlyBars(expenses: g.expenses),
         ],
         const SizedBox(height: 24),
       ],
@@ -2191,6 +2424,457 @@ class _ContactPickerSheetState extends State<_ContactPickerSheet> {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ============================================================
+//  Tab 4: Account (profile, settings, log out)
+// ============================================================
+
+class AccountTab extends StatelessWidget {
+  const AccountTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final user = FirebaseAuth.instance.currentUser;
+        final shownName = user?.displayName?.trim() ?? '';
+        final email = user?.email ?? '';
+        final name = shownName.isNotEmpty
+            ? shownName
+            : (email.isNotEmpty ? email.split('@').first : 'Guest');
+        final photo = user?.photoURL;
+        final letter = name.isNotEmpty ? name[0].toUpperCase() : '?';
+        final initial = Container(
+          color: Colors.teal,
+          alignment: Alignment.center,
+          child: Text(
+            letter,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        );
+
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    ClipOval(
+                      child: SizedBox(
+                        width: 64,
+                        height: 64,
+                        child: photo != null
+                            ? Image.network(
+                                photo,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => initial,
+                              )
+                            : initial,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          if (email.isNotEmpty) Text(email),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.dark_mode_outlined),
+                    title: const Text('Dark mode'),
+                    trailing: Switch(
+                      value: store.dark,
+                      onChanged: (v) {
+                        store.dark = v;
+                        store.changed();
+                      },
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.groups_outlined),
+                    title: const Text('Groups'),
+                    trailing: Text('${store.groups.length}'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.payments_outlined),
+                    title: const Text('Currency'),
+                    trailing: DropdownButton<String>(
+                      value: currencies.contains(store.currency)
+                          ? store.currency
+                          : currencies.first,
+                      underline: const SizedBox.shrink(),
+                      items: [
+                        for (final c in currencies)
+                          DropdownMenuItem(value: c, child: Text(c)),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        store.currency = v;
+                        store.changed();
+                      },
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.badge_outlined),
+                    title: const Text('My name in groups'),
+                    subtitle: store.allMembers.isEmpty
+                        ? const Text('Add members first')
+                        : null,
+                    trailing: store.allMembers.isEmpty
+                        ? null
+                        : DropdownButton<String>(
+                            value: store.me,
+                            hint: const Text('Choose'),
+                            underline: const SizedBox.shrink(),
+                            items: [
+                              for (final m in store.allMembers)
+                                DropdownMenuItem(value: m, child: Text(m)),
+                            ],
+                            onChanged: (v) {
+                              if (v == null) return;
+                              store.myName = v;
+                              store.changed();
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.logout, color: Colors.teal),
+                title: const Text('Log out', style: TextStyle(color: Colors.teal)),
+                onTap: () => signOut(),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ============================================================
+//  Charts (donut + monthly bars) - drawn by hand, no package
+// ============================================================
+
+class _DonutPainter extends CustomPainter {
+  final List<MapEntry<String, double>> data;
+  final double total;
+  _DonutPainter(this.data, this.total);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (total <= 0) return;
+    final side = min(size.width, size.height);
+    final stroke = side * 0.2;
+    final rect = Rect.fromCenter(
+      center: size.center(Offset.zero),
+      width: side - stroke - 8,
+      height: side - stroke - 8,
+    );
+    var start = -pi / 2;
+    for (final e in data) {
+      final sweep = 2 * pi * e.value / total;
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = stroke
+        ..color = bgColorFor(e.key);
+      canvas.drawArc(rect, start, max(sweep - 0.03, 0.001), false, paint);
+      start += sweep;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DonutPainter old) => true;
+}
+
+class _MonthlyBars extends StatelessWidget {
+  final List<Expense> expenses;
+  const _MonthlyBars({required this.expenses});
+
+  static const _names = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final months = [
+      for (var i = 5; i >= 0; i--) DateTime(now.year, now.month - i),
+    ];
+    final sums = <double>[
+      for (final m in months)
+        expenses
+            .where((e) => e.date.year == m.year && e.date.month == m.month)
+            .fold<double>(0.0, (s, e) => s + e.total),
+    ];
+    final maxV = sums.fold<double>(0.0, (a, b) => max(a, b));
+    return SizedBox(
+      height: 170,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          for (var i = 0; i < months.length; i++)
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    sums[i] > 0 ? _plain(sums[i]) : '',
+                    style: const TextStyle(fontSize: 10),
+                  ),
+                  const SizedBox(height: 2),
+                  Container(
+                    height: maxV > 0 ? max(3.0, 120.0 * sums[i] / maxV) : 3.0,
+                    margin: const EdgeInsets.symmetric(horizontal: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.teal,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _names[months[i].month - 1],
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+//  Tab 4: Friends (what you owe / are owed across all groups)
+// ============================================================
+
+class FriendsTab extends StatelessWidget {
+  const FriendsTab({super.key});
+
+  void _remind(BuildContext context, String friend, double amount) {
+    final text =
+        'Hi $friend, a friendly reminder that you owe me ${rs(amount)} on Splitwise Pro. Thanks!';
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('Reminder copied. Paste it into WhatsApp or SMS.'),
+        ),
+      );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final me = store.me;
+        if (me == null) {
+          final names = store.allMembers;
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              const SizedBox(height: 24),
+              const Text(
+                'Which member are you?',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Pick your name so we can show what you owe each friend.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              if (names.isEmpty)
+                const Text(
+                  'Add members in the Add tab first.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey),
+                )
+              else
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final n in names)
+                      ActionChip(
+                        label: Text(n),
+                        onPressed: () {
+                          store.myName = n;
+                          store.changed();
+                        },
+                      ),
+                  ],
+                ),
+            ],
+          );
+        }
+
+        // friend -> list of (group name, amount). Positive = friend owes you.
+        final perFriend = <String, List<MapEntry<String, double>>>{};
+        for (final g in store.groups) {
+          for (final t in g.settlements()) {
+            if (t.from == me) {
+              perFriend
+                  .putIfAbsent(t.to, () => [])
+                  .add(MapEntry(g.name, -t.amount));
+            } else if (t.to == me) {
+              perFriend
+                  .putIfAbsent(t.from, () => [])
+                  .add(MapEntry(g.name, t.amount));
+            }
+          }
+        }
+        final totals = <MapEntry<String, double>>[
+          for (final e in perFriend.entries)
+            MapEntry(e.key, e.value.fold<double>(0.0, (s, x) => s + x.value)),
+        ].where((e) => e.value.abs() >= 0.01).toList()
+          ..sort((a, b) => b.value.compareTo(a.value));
+
+        final owedToMe = totals
+            .where((e) => e.value > 0)
+            .fold<double>(0.0, (s, e) => s + e.value);
+        final iOwe = totals
+            .where((e) => e.value < 0)
+            .fold<double>(0.0, (s, e) => s - e.value);
+
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Card(
+              elevation: 4,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hi $me - across all your groups',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'You are owed ${rs(owedToMe)}',
+                      style: TextStyle(
+                        color: Colors.green.shade600,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      'You owe ${rs(iOwe)}',
+                      style: TextStyle(
+                        color: Colors.red.shade400,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Not you? Change it in the Account tab.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (totals.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Text(
+                    'All settled up across your groups. 🎉',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              ),
+            for (final f in totals)
+              Card(
+                child: ExpansionTile(
+                  leading: CircleAvatar(
+                    backgroundColor: bgColorFor(f.key),
+                    child: Text(
+                      f.key.isNotEmpty ? f.key[0].toUpperCase() : '?',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  title: Text(f.key),
+                  subtitle: Text(
+                    f.value > 0
+                        ? 'owes you ${rs(f.value)}'
+                        : 'you owe ${rs(-f.value)}',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: f.value > 0
+                          ? Colors.green.shade600
+                          : Colors.red.shade400,
+                    ),
+                  ),
+                  children: [
+                    for (final x in perFriend[f.key] ?? <MapEntry<String, double>>[])
+                      ListTile(
+                        dense: true,
+                        title: Text(x.key),
+                        trailing: Text(
+                          x.value > 0 ? '+${rs(x.value)}' : '-${rs(-x.value)}',
+                        ),
+                      ),
+                    if (f.value > 0)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 8, bottom: 8),
+                          child: TextButton.icon(
+                            onPressed: () => _remind(context, f.key, f.value),
+                            icon: const Icon(Icons.notifications_active_outlined),
+                            label: const Text('Copy reminder message'),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 24),
+          ],
+        );
+      },
     );
   }
 }
