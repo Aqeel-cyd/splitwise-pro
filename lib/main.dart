@@ -9,6 +9,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:flutter_contacts/flutter_contacts.dart' show FlutterContacts;
+import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 
 import 'firebase_options.dart';
 
@@ -272,6 +273,7 @@ class Expense {
   final SplitMode mode;
   final Map<String, double>
   weights; // member -> weight (1 / amount / % / shares)
+  final String? receipt; // receipt photo (base64), saved on this device
 
   Expense({
     required this.id,
@@ -281,6 +283,7 @@ class Expense {
     required this.payers,
     required this.mode,
     required this.weights,
+    this.receipt,
   });
 
   double get total => payers.values.fold(0.0, (s, v) => s + v);
@@ -302,6 +305,7 @@ class Expense {
     'payers': payers,
     'mode': mode.name,
     'weights': weights,
+    if (receipt != null) 'receipt': receipt,
   };
 
   factory Expense.fromJson(Map<String, dynamic> j) => Expense(
@@ -312,6 +316,33 @@ class Expense {
     payers: _dmap(j['payers']),
     mode: SplitMode.values.byName(j['mode'] as String),
     weights: _dmap(j['weights']),
+    receipt: j['receipt'] as String?,
+  );
+}
+
+class Reminder {
+  final String id;
+  final String friend;
+  final DateTime due;
+
+  Reminder({required this.id, required this.friend, required this.due});
+
+  bool get isDue {
+    final n = DateTime.now();
+    return !DateTime(due.year, due.month, due.day)
+        .isAfter(DateTime(n.year, n.month, n.day));
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'friend': friend,
+    'due': due.toIso8601String(),
+  };
+
+  factory Reminder.fromJson(Map<String, dynamic> j) => Reminder(
+    id: j['id'] as String,
+    friend: j['friend'] as String,
+    due: DateTime.parse(j['due'] as String),
   );
 }
 
@@ -496,9 +527,33 @@ class AppStore extends ChangeNotifier {
   bool loaded = false;
   String currency = 'Rs.';
   String? myName;
+  List<Reminder> reminders = [];
 
   Group get current =>
       groups.firstWhere((g) => g.id == currentId, orElse: () => groups.first);
+
+  // How many reminders are due today or overdue
+  int get dueReminders => reminders.where((r) => r.isDue).length;
+
+  // friend -> list of (group name, amount). Positive = friend owes you.
+  Map<String, List<MapEntry<String, double>>> perFriend() {
+    final out = <String, List<MapEntry<String, double>>>{};
+    final who = me;
+    if (who == null) return out;
+    for (final g in groups) {
+      for (final t in g.settlements()) {
+        if (t.from == who) {
+          out.putIfAbsent(t.to, () => []).add(MapEntry(g.name, -t.amount));
+        } else if (t.to == who) {
+          out.putIfAbsent(t.from, () => []).add(MapEntry(g.name, t.amount));
+        }
+      }
+    }
+    return out;
+  }
+
+  double friendTotal(String friend) => (perFriend()[friend] ?? [])
+      .fold<double>(0.0, (s, x) => s + x.value);
 
   // Every member name used in any group
   List<String> get allMembers {
@@ -542,6 +597,9 @@ class AppStore extends ChangeNotifier {
         dark = j['dark'] as bool? ?? false;
         currency = j['currency'] as String? ?? 'Rs.';
         myName = j['myName'] as String?;
+        reminders = ((j['reminders'] as List?) ?? [])
+            .map((r) => Reminder.fromJson(r as Map<String, dynamic>))
+            .toList();
       }
     } catch (_) {
       // Corrupt or missing data: start fresh
@@ -565,6 +623,7 @@ class AppStore extends ChangeNotifier {
           'dark': dark,
           'currency': currency,
           'myName': myName,
+          'reminders': reminders.map((r) => r.toJson()).toList(),
         }),
       );
     } catch (_) {}
@@ -1038,7 +1097,7 @@ class _HomeScreenState extends State<HomeScreen>
           bottomNavigationBar: NavigationBar(
             selectedIndex: _tabs.index,
             onDestinationSelected: (i) => _tabs.animateTo(i),
-            destinations: const [
+            destinations: [
               NavigationDestination(
                 icon: Icon(Icons.add_circle_outline),
                 selectedIcon: Icon(Icons.add_circle),
@@ -1055,8 +1114,16 @@ class _HomeScreenState extends State<HomeScreen>
                 label: 'Balances',
               ),
               NavigationDestination(
-                icon: Icon(Icons.people_outline),
-                selectedIcon: Icon(Icons.people),
+                icon: Badge(
+                  isLabelVisible: store.dueReminders > 0,
+                  label: Text('${store.dueReminders}'),
+                  child: const Icon(Icons.people_outline),
+                ),
+                selectedIcon: Badge(
+                  isLabelVisible: store.dueReminders > 0,
+                  label: Text('${store.dueReminders}'),
+                  child: const Icon(Icons.people),
+                ),
                 label: 'Friends',
               ),
               NavigationDestination(
@@ -1111,6 +1178,7 @@ class _ExpenseFormState extends State<ExpenseForm>
   final Map<String, TextEditingController> _payers = {};
   final Map<String, TextEditingController> _parts = {};
   String? _editingId;
+  String? _receipt; // base64 photo of the receipt
 
   @override
   bool get wantKeepAlive => true;
@@ -1144,6 +1212,7 @@ class _ExpenseFormState extends State<ExpenseForm>
       _category = categories.first;
       _date = DateTime.now();
       _mode = SplitMode.equal;
+      _receipt = null;
     });
   }
 
@@ -1156,6 +1225,7 @@ class _ExpenseFormState extends State<ExpenseForm>
       _category = e.category;
       _date = e.date;
       _mode = e.mode;
+      _receipt = e.receipt;
       e.payers.forEach(
         (k, v) => _payers[k] = TextEditingController(text: _plain(v)),
       );
@@ -1165,6 +1235,57 @@ class _ExpenseFormState extends State<ExpenseForm>
         ),
       );
     });
+  }
+
+  Future<void> _pickReceipt(ImageSource source) async {
+    try {
+      final x = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 900,
+        imageQuality: 60,
+      );
+      if (x == null) return;
+      final bytes = await x.readAsBytes();
+      final data = base64Encode(bytes);
+      if (!mounted) return;
+      if (data.length > 400000) {
+        _snack('That photo is too big. Try a smaller one.');
+        return;
+      }
+      setState(() => _receipt = data);
+    } catch (_) {
+      _snack('Could not open the camera or gallery on this device.');
+    }
+  }
+
+  void _receiptSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!kIsWeb)
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Take a photo'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickReceipt(ImageSource.camera);
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: Text(kIsWeb ? 'Choose a file' : 'Choose from gallery'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickReceipt(ImageSource.gallery);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   double get _draftTotal =>
@@ -1316,6 +1437,7 @@ class _ExpenseFormState extends State<ExpenseForm>
       payers: payers,
       mode: _mode,
       weights: weights,
+      receipt: _receipt,
     );
 
     if (_editingId != null) {
@@ -1642,7 +1764,42 @@ class _ExpenseFormState extends State<ExpenseForm>
               ),
             ),
         _splitSummary(),
-        const SizedBox(height: 20),
+        const SizedBox(height: 12),
+
+        // ---- Receipt photo ----
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _receiptSheet,
+              icon: const Icon(Icons.receipt_long_outlined),
+              label: Text(
+                _receipt == null
+                    ? 'Attach receipt photo'
+                    : 'Change receipt photo',
+              ),
+            ),
+            if (_receipt != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(
+                  base64Decode(_receipt!),
+                  width: 48,
+                  height: 48,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Remove photo',
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() => _receipt = null),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 16),
 
         FilledButton.icon(
           onPressed: _save,
@@ -1763,6 +1920,35 @@ class _HistoryTabState extends State<HistoryTab> {
       );
   }
 
+  void _showReceipt(Expense e) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                'Receipt - ${e.title}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            Flexible(
+              child: InteractiveViewer(
+                child: Image.memory(base64Decode(e.receipt!)),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _expenseCard(Group g, int index) {
     final e = g.expenses[index];
     final shares = e.shares;
@@ -1788,6 +1974,12 @@ class _HistoryTabState extends State<HistoryTab> {
                     ),
                   ),
                 ),
+                if (e.receipt != null)
+                  IconButton(
+                    tooltip: 'View receipt',
+                    icon: const Icon(Icons.image_outlined),
+                    onPressed: () => _showReceipt(e),
+                  ),
                 IconButton(
                   tooltip: 'Edit',
                   icon: const Icon(Icons.edit_outlined),
@@ -2435,6 +2627,52 @@ class _ContactPickerSheetState extends State<_ContactPickerSheet> {
 class AccountTab extends StatelessWidget {
   const AccountTab({super.key});
 
+  Future<void> _editName(BuildContext context, String current) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final ctl = TextEditingController(text: current);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit your name'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(
+            labelText: 'Name',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty) return;
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      await user?.updateDisplayName(newName);
+      await user?.reload();
+      store.changed();
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(content: Text('Name updated')));
+    } catch (_) {
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(content: Text('Could not update the name. Try again.')),
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -2521,6 +2759,12 @@ class AccountTab extends StatelessWidget {
                     leading: const Icon(Icons.groups_outlined),
                     title: const Text('Groups'),
                     trailing: Text('${store.groups.length}'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.edit_outlined),
+                    title: const Text('Edit name'),
+                    subtitle: Text(name),
+                    onTap: () => _editName(context, shownName),
                   ),
                   ListTile(
                     leading: const Icon(Icons.payments_outlined),
@@ -2683,6 +2927,25 @@ class _MonthlyBars extends StatelessWidget {
 class FriendsTab extends StatelessWidget {
   const FriendsTab({super.key});
 
+  Future<void> _setReminder(BuildContext context, String friend) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(days: 3)),
+      firstDate: now,
+      lastDate: DateTime(now.year + 2),
+    );
+    if (picked == null) return;
+    store.reminders.add(Reminder(id: newId(), friend: friend, due: picked));
+    store.changed();
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(content: Text('Reminder set for ${fmtDate(picked)}')),
+      );
+  }
+
   void _remind(BuildContext context, String friend, double amount) {
     final text =
         'Hi $friend, a friendly reminder that you owe me ${rs(amount)} on Splitwise Pro. Thanks!';
@@ -2815,6 +3078,71 @@ class FriendsTab extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
+            if (store.reminders.isNotEmpty) ...[
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                        child: Text(
+                          'Reminders',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      for (final r in ([...store.reminders]
+                        ..sort((a, b) => a.due.compareTo(b.due))))
+                        Builder(
+                          builder: (_) {
+                            final owed = store.friendTotal(r.friend);
+                            final due = r.isDue;
+                            return ListTile(
+                              leading: Icon(
+                                due
+                                    ? Icons.notifications_active
+                                    : Icons.schedule,
+                                color: due ? Colors.red.shade400 : null,
+                              ),
+                              title: Text(r.friend),
+                              subtitle: Text(
+                                '${due ? 'Due' : 'On'} ${fmtDate(r.due)}'
+                                '${owed > 0.01 ? '  •  owes you ${rs(owed)}' : '  •  nothing owed now'}',
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (owed > 0.01)
+                                    IconButton(
+                                      tooltip: 'Copy reminder message',
+                                      icon: const Icon(Icons.copy_outlined),
+                                      onPressed: () =>
+                                          _remind(context, r.friend, owed),
+                                    ),
+                                  IconButton(
+                                    tooltip: 'Delete reminder',
+                                    icon: const Icon(Icons.delete_outline),
+                                    onPressed: () {
+                                      store.reminders
+                                          .removeWhere((x) => x.id == r.id);
+                                      store.changed();
+                                    },
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             if (totals.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 32),
@@ -2861,10 +3189,21 @@ class FriendsTab extends StatelessWidget {
                         alignment: Alignment.centerLeft,
                         child: Padding(
                           padding: const EdgeInsets.only(left: 8, bottom: 8),
-                          child: TextButton.icon(
-                            onPressed: () => _remind(context, f.key, f.value),
-                            icon: const Icon(Icons.notifications_active_outlined),
-                            label: const Text('Copy reminder message'),
+                          child: Wrap(
+                            spacing: 4,
+                            children: [
+                              TextButton.icon(
+                                onPressed: () =>
+                                    _remind(context, f.key, f.value),
+                                icon: const Icon(Icons.copy_outlined),
+                                label: const Text('Copy message'),
+                              ),
+                              TextButton.icon(
+                                onPressed: () => _setReminder(context, f.key),
+                                icon: const Icon(Icons.event_outlined),
+                                label: const Text('Remind me on...'),
+                              ),
+                            ],
                           ),
                         ),
                       ),
