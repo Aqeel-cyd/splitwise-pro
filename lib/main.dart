@@ -8,10 +8,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter_contacts/flutter_contacts.dart' show FlutterContacts;
+import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 
 import 'firebase_options.dart';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,9 +24,11 @@ void main() async {
 
 bool _googleReady = false;
 
-Future<UserCredential> signInWithGoogle() async {
+Future<void> signInWithGoogle() async {
   if (kIsWeb) {
-    return await FirebaseAuth.instance.signInWithPopup(GoogleAuthProvider());
+    // Chrome: popup login (redirect login does not work reliably on localhost).
+    await FirebaseAuth.instance.signInWithPopup(GoogleAuthProvider());
+    return;
   }
 
   if (!_googleReady) {
@@ -34,7 +39,7 @@ Future<UserCredential> signInWithGoogle() async {
   final credential = GoogleAuthProvider.credential(
     idToken: account.authentication.idToken,
   );
-  return await FirebaseAuth.instance.signInWithCredential(credential);
+  await FirebaseAuth.instance.signInWithCredential(credential);
 }
 
 Future<void> signOut() async {
@@ -56,7 +61,178 @@ const List<String> categories = [
   'Other',
 ];
 
-String rs(double v) => 'Rs. ${v.toStringAsFixed(2)}';
+// ============================================================
+//  Moving background (changes colour when you pick something)
+// ============================================================
+
+/// The item the user picked last (a category or a member name).
+final ValueNotifier<String?> bgSelection = ValueNotifier<String?>(null);
+
+/// Goes up by one every time something is picked, to "kick" the motion.
+final ValueNotifier<int> bgKick = ValueNotifier<int>(0);
+
+const Map<String, Color> _catColors = {
+  'Food': Colors.orange,
+  'Transport': Colors.blue,
+  'Stay': Colors.purple,
+  'Shopping': Colors.pink,
+  'Entertainment': Colors.amber,
+  'Bills': Colors.red,
+  'Other': Colors.blueGrey,
+};
+
+Color bgColorFor(String? key) {
+  if (key == null) return Colors.teal;
+  final known = _catColors[key];
+  if (known != null) return known;
+  // Member names: same name always gives the same colour.
+  var h = 0;
+  for (final u in key.codeUnits) {
+    h = (h * 31 + u) & 0xFFFF;
+  }
+  return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.65, 0.5).toColor();
+}
+
+void bgPick(String? key) {
+  bgSelection.value = key;
+  bgKick.value++;
+}
+
+class AnimatedBackground extends StatefulWidget {
+  final bool dark;
+  const AnimatedBackground({super.key, required this.dark});
+
+  @override
+  State<AnimatedBackground> createState() => _AnimatedBackgroundState();
+}
+
+class _AnimatedBackgroundState extends State<AnimatedBackground>
+    with TickerProviderStateMixin {
+  // Slow loop that keeps the background floating all the time.
+  late final AnimationController _loop = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 24),
+  )..repeat();
+
+  // Extra swirl that plays each time something is picked.
+  late final AnimationController _kick = AnimationController.unbounded(
+    vsync: this,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    bgKick.addListener(_onKick);
+  }
+
+  void _onKick() {
+    _kick.animateTo(
+      _kick.value.floor() + 1.0,
+      duration: const Duration(milliseconds: 1400),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  void dispose() {
+    bgKick.removeListener(_onKick);
+    _loop.dispose();
+    _kick.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: ValueListenableBuilder<String?>(
+        valueListenable: bgSelection,
+        builder: (context, key, _) {
+          final target = bgColorFor(key);
+          return TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: target),
+            duration: const Duration(milliseconds: 900),
+            builder: (context, color, _) {
+              final c = color ?? target;
+              return AnimatedBuilder(
+                animation: Listenable.merge([_loop, _kick]),
+                builder: (context, _) => _paint(c),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _paint(Color c) {
+    final dark = widget.dark;
+    final t = _loop.value * 2 * pi;
+    final swirl = _kick.value * 2.2;
+    final f = _kick.value - _kick.value.floorToDouble();
+    final pulse = sin(f * pi); // 0 -> 1 -> 0 during a pick
+
+    final base = dark ? const Color(0xFF0E1114) : Colors.white;
+    final top = Color.lerp(base, c, dark ? 0.20 : 0.14)!;
+    final bottom = Color.lerp(base, c, dark ? 0.42 : 0.34)!;
+    final hsl = HSLColor.fromColor(c);
+
+    return LayoutBuilder(
+      builder: (context, box) {
+        final w = box.maxWidth;
+        final h = box.maxHeight;
+        final blobs = <Widget>[];
+        for (var i = 0; i < 4; i++) {
+          final phase = i * 1.7 + swirl;
+          final size = min(w, h) * (0.55 + 0.1 * i) * (1 + 0.5 * pulse);
+          final x = w * (0.5 + 0.45 * sin(t * (1 + i % 2) + phase));
+          final y = h * (0.5 + 0.45 * cos(t * (1 + (i + 1) % 2) + phase * 0.8));
+          final blob = hsl
+              .withHue((hsl.hue + 35 * i) % 360)
+              .withLightness(0.55)
+              .toColor();
+          blobs.add(
+            Positioned(
+              left: x - size / 2,
+              top: y - size / 2,
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      blob.withAlpha(dark ? 110 : 90),
+                      blob.withAlpha(0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment(-1 + 0.4 * sin(t), -1),
+                    end: Alignment(1 - 0.4 * cos(t), 1),
+                    colors: [top, bottom],
+                  ),
+                ),
+              ),
+            ),
+            ...blobs,
+          ],
+        );
+      },
+    );
+  }
+}
+
+const List<String> currencies = ['Rs.', '\$', '₹', '€', '£', '¥', 'AED', 'SAR'];
+String rs(double v) => '${store.currency} ${v.toStringAsFixed(2)}';
 String _two(int n) => n.toString().padLeft(2, '0');
 String fmtDate(DateTime d) => '${d.year}-${_two(d.month)}-${_two(d.day)}';
 double? parseNum(String s) => double.tryParse(s.trim().replaceAll(',', ''));
@@ -97,6 +273,7 @@ class Expense {
   final SplitMode mode;
   final Map<String, double>
   weights; // member -> weight (1 / amount / % / shares)
+  final String? receipt; // receipt photo (base64), saved on this device
 
   Expense({
     required this.id,
@@ -106,6 +283,7 @@ class Expense {
     required this.payers,
     required this.mode,
     required this.weights,
+    this.receipt,
   });
 
   double get total => payers.values.fold(0.0, (s, v) => s + v);
@@ -127,6 +305,7 @@ class Expense {
     'payers': payers,
     'mode': mode.name,
     'weights': weights,
+    if (receipt != null) 'receipt': receipt,
   };
 
   factory Expense.fromJson(Map<String, dynamic> j) => Expense(
@@ -137,6 +316,33 @@ class Expense {
     payers: _dmap(j['payers']),
     mode: SplitMode.values.byName(j['mode'] as String),
     weights: _dmap(j['weights']),
+    receipt: j['receipt'] as String?,
+  );
+}
+
+class Reminder {
+  final String id;
+  final String friend;
+  final DateTime due;
+
+  Reminder({required this.id, required this.friend, required this.due});
+
+  bool get isDue {
+    final n = DateTime.now();
+    return !DateTime(due.year, due.month, due.day)
+        .isAfter(DateTime(n.year, n.month, n.day));
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'friend': friend,
+    'due': due.toIso8601String(),
+  };
+
+  factory Reminder.fromJson(Map<String, dynamic> j) => Reminder(
+    id: j['id'] as String,
+    friend: j['friend'] as String,
+    due: DateTime.parse(j['due'] as String),
   );
 }
 
@@ -319,9 +525,64 @@ class AppStore extends ChangeNotifier {
   String? currentId;
   bool dark = false;
   bool loaded = false;
+  String currency = 'Rs.';
+  String? myName;
+  List<Reminder> reminders = [];
 
   Group get current =>
       groups.firstWhere((g) => g.id == currentId, orElse: () => groups.first);
+
+  // How many reminders are due today or overdue
+  int get dueReminders => reminders.where((r) => r.isDue).length;
+
+  // friend -> list of (group name, amount). Positive = friend owes you.
+  Map<String, List<MapEntry<String, double>>> perFriend() {
+    final out = <String, List<MapEntry<String, double>>>{};
+    final who = me;
+    if (who == null) return out;
+    for (final g in groups) {
+      for (final t in g.settlements()) {
+        if (t.from == who) {
+          out.putIfAbsent(t.to, () => []).add(MapEntry(g.name, -t.amount));
+        } else if (t.to == who) {
+          out.putIfAbsent(t.from, () => []).add(MapEntry(g.name, t.amount));
+        }
+      }
+    }
+    return out;
+  }
+
+  double friendTotal(String friend) => (perFriend()[friend] ?? [])
+      .fold<double>(0.0, (s, x) => s + x.value);
+
+  // Every member name used in any group
+  List<String> get allMembers {
+    final set = <String>{};
+    for (final g in groups) {
+      set.addAll(g.members);
+    }
+    return set.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+  }
+
+  // Which member is the signed-in user (chosen, or guessed from the account)
+  String? get me {
+    final names = allMembers;
+    if (myName != null && names.contains(myName)) return myName;
+    final u = FirebaseAuth.instance.currentUser;
+    final cands = <String>[];
+    final dn = u?.displayName?.trim() ?? '';
+    if (dn.isNotEmpty) {
+      cands.add(dn.toLowerCase());
+      cands.add(dn.split(' ').first.toLowerCase());
+    }
+    final em = u?.email ?? '';
+    if (em.contains('@')) cands.add(em.split('@').first.toLowerCase());
+    for (final m in names) {
+      if (cands.contains(m.toLowerCase())) return m;
+    }
+    return null;
+  }
 
   Future<void> load() async {
     try {
@@ -334,6 +595,11 @@ class AppStore extends ChangeNotifier {
             .toList();
         currentId = j['currentId'] as String?;
         dark = j['dark'] as bool? ?? false;
+        currency = j['currency'] as String? ?? 'Rs.';
+        myName = j['myName'] as String?;
+        reminders = ((j['reminders'] as List?) ?? [])
+            .map((r) => Reminder.fromJson(r as Map<String, dynamic>))
+            .toList();
       }
     } catch (_) {
       // Corrupt or missing data: start fresh
@@ -355,6 +621,9 @@ class AppStore extends ChangeNotifier {
           'groups': groups.map((g) => g.toJson()).toList(),
           'currentId': currentId,
           'dark': dark,
+          'currency': currency,
+          'myName': myName,
+          'reminders': reminders.map((r) => r.toJson()).toList(),
         }),
       );
     } catch (_) {}
@@ -451,47 +720,200 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _confirm = TextEditingController();
   bool _busy = false;
+  bool _isSignUp = false;
+  bool _hidePass = true;
 
-  Future<void> _signIn() async {
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  void _msg(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  String _friendly(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-email':
+        return 'That email looks wrong';
+      case 'user-not-found':
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Wrong email or password';
+      case 'email-already-in-use':
+        return 'This email already has an account. Try logging in';
+      case 'weak-password':
+        return 'Password must be at least 6 characters';
+      case 'network-request-failed':
+        return 'No internet connection';
+      default:
+        return e.message ?? 'Sign-in failed';
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
     setState(() => _busy = true);
     try {
-      await signInWithGoogle();
+      await action();
     } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(content: Text(e.message ?? 'Sign-in failed')),
-          );
-      }
+      _msg(_friendly(e));
+    } catch (_) {
+      _msg('Something went wrong. Try again');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
+  Future<void> _submit() async {
+    final email = _email.text.trim();
+    final pass = _password.text;
+    if (email.isEmpty || pass.isEmpty) {
+      _msg('Enter your email and password');
+      return;
+    }
+    if (_isSignUp && pass != _confirm.text) {
+      _msg('Passwords do not match');
+      return;
+    }
+    await _run(() async {
+      if (_isSignUp) {
+        await FirebaseAuth.instance
+            .createUserWithEmailAndPassword(email: email, password: pass);
+      } else {
+        await FirebaseAuth.instance
+            .signInWithEmailAndPassword(email: email, password: pass);
+      }
+    });
+  }
+
+  Future<void> _forgot() async {
+    final email = _email.text.trim();
+    if (email.isEmpty) {
+      _msg('Type your email first');
+      return;
+    }
+    await _run(() async {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      _msg('Password reset email sent');
+    });
+  }
+
+  Future<void> _google() => _run(() async {
+        await signInWithGoogle();
+      });
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
-            const SizedBox(height: 12),
-            const Text(
-              'Splitwise Pro',
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 24),
-            _busy
-                ? const CircularProgressIndicator()
-                : FilledButton.icon(
-                    icon: const Icon(Icons.login),
-                    label: const Text('Sign in with Google'),
-                    onPressed: _signIn,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.receipt_long, size: 64, color: Colors.teal),
+                const SizedBox(height: 12),
+                const Text(
+                  'Splitwise Pro',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 24),
+                TextField(
+                  controller: _email,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email',
+                    prefixIcon: Icon(Icons.email_outlined),
+                    border: OutlineInputBorder(),
                   ),
-          ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _password,
+                  obscureText: _hidePass,
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    prefixIcon: const Icon(Icons.lock_outline),
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(_hidePass
+                          ? Icons.visibility_off
+                          : Icons.visibility),
+                      onPressed: () =>
+                          setState(() => _hidePass = !_hidePass),
+                    ),
+                  ),
+                ),
+                if (_isSignUp) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _confirm,
+                    obscureText: _hidePass,
+                    decoration: const InputDecoration(
+                      labelText: 'Confirm password',
+                      prefixIcon: Icon(Icons.lock_outline),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+                if (!_isSignUp)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: _busy ? null : _forgot,
+                      child: const Text('Forgot password?'),
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                if (_busy)
+                  const Center(child: CircularProgressIndicator())
+                else ...[
+                  FilledButton(
+                    onPressed: _submit,
+                    child: Text(_isSignUp ? 'Create account' : 'Log in'),
+                  ),
+                  const SizedBox(height: 12),
+                  const Row(
+                    children: [
+                      Expanded(child: Divider()),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Text('or'),
+                      ),
+                      Expanded(child: Divider()),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.login),
+                    label: const Text('Continue with Google'),
+                    onPressed: _google,
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () => setState(() => _isSignUp = !_isSignUp),
+                    child: Text(_isSignUp
+                        ? 'Already have an account? Log in'
+                        : "Don't have an account? Sign up"),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -507,8 +929,16 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
-  late final TabController _tabs = TabController(length: 3, vsync: this);
+  late final TabController _tabs = TabController(length: 5, vsync: this);
   final GlobalKey<_ExpenseFormState> _formKey = GlobalKey<_ExpenseFormState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
 
   @override
   void dispose() {
@@ -605,7 +1035,12 @@ class _HomeScreenState extends State<HomeScreen>
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) {
-        return Scaffold(
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            Positioned.fill(child: AnimatedBackground(dark: store.dark)),
+            Scaffold(
+          backgroundColor: Colors.transparent,
           appBar: AppBar(
             backgroundColor: Colors.teal,
             foregroundColor: Colors.white,
@@ -658,17 +1093,45 @@ class _HomeScreenState extends State<HomeScreen>
                 ],
               ),
             ],
-            bottom: TabBar(
-              controller: _tabs,
-              labelColor: Colors.white,
-              unselectedLabelColor: Colors.white70,
-              indicatorColor: Colors.white,
-              tabs: const [
-                Tab(icon: Icon(Icons.add_circle_outline), text: 'Add'),
-                Tab(icon: Icon(Icons.receipt_long), text: 'History'),
-                Tab(icon: Icon(Icons.account_balance_wallet), text: 'Balances'),
-              ],
-            ),
+          ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _tabs.index,
+            onDestinationSelected: (i) => _tabs.animateTo(i),
+            destinations: [
+              NavigationDestination(
+                icon: Icon(Icons.add_circle_outline),
+                selectedIcon: Icon(Icons.add_circle),
+                label: 'Add',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.receipt_long_outlined),
+                selectedIcon: Icon(Icons.receipt_long),
+                label: 'History',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.account_balance_wallet_outlined),
+                selectedIcon: Icon(Icons.account_balance_wallet),
+                label: 'Balances',
+              ),
+              NavigationDestination(
+                icon: Badge(
+                  isLabelVisible: store.dueReminders > 0,
+                  label: Text('${store.dueReminders}'),
+                  child: const Icon(Icons.people_outline),
+                ),
+                selectedIcon: Badge(
+                  isLabelVisible: store.dueReminders > 0,
+                  label: Text('${store.dueReminders}'),
+                  child: const Icon(Icons.people),
+                ),
+                label: 'Friends',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.person_outline),
+                selectedIcon: Icon(Icons.person),
+                label: 'Account',
+              ),
+            ],
           ),
           body: Align(
             alignment: Alignment.topCenter,
@@ -680,10 +1143,14 @@ class _HomeScreenState extends State<HomeScreen>
                   ExpenseForm(key: _formKey),
                   HistoryTab(onEdit: _edit),
                   const BalancesTab(),
+                  const FriendsTab(),
+                  const AccountTab(),
                 ],
               ),
             ),
           ),
+        ),
+          ],
         );
       },
     );
@@ -711,6 +1178,7 @@ class _ExpenseFormState extends State<ExpenseForm>
   final Map<String, TextEditingController> _payers = {};
   final Map<String, TextEditingController> _parts = {};
   String? _editingId;
+  String? _receipt; // base64 photo of the receipt
 
   @override
   bool get wantKeepAlive => true;
@@ -744,6 +1212,7 @@ class _ExpenseFormState extends State<ExpenseForm>
       _category = categories.first;
       _date = DateTime.now();
       _mode = SplitMode.equal;
+      _receipt = null;
     });
   }
 
@@ -756,6 +1225,7 @@ class _ExpenseFormState extends State<ExpenseForm>
       _category = e.category;
       _date = e.date;
       _mode = e.mode;
+      _receipt = e.receipt;
       e.payers.forEach(
         (k, v) => _payers[k] = TextEditingController(text: _plain(v)),
       );
@@ -765,6 +1235,57 @@ class _ExpenseFormState extends State<ExpenseForm>
         ),
       );
     });
+  }
+
+  Future<void> _pickReceipt(ImageSource source) async {
+    try {
+      final x = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 900,
+        imageQuality: 60,
+      );
+      if (x == null) return;
+      final bytes = await x.readAsBytes();
+      final data = base64Encode(bytes);
+      if (!mounted) return;
+      if (data.length > 400000) {
+        _snack('That photo is too big. Try a smaller one.');
+        return;
+      }
+      setState(() => _receipt = data);
+    } catch (_) {
+      _snack('Could not open the camera or gallery on this device.');
+    }
+  }
+
+  void _receiptSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!kIsWeb)
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Take a photo'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickReceipt(ImageSource.camera);
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: Text(kIsWeb ? 'Choose a file' : 'Choose from gallery'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickReceipt(ImageSource.gallery);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   double get _draftTotal =>
@@ -781,6 +1302,48 @@ class _ExpenseFormState extends State<ExpenseForm>
     g.members.add(name);
     _newMember.clear();
     store.changed();
+  }
+
+  Future<void> _pickFromContacts() async {
+    final onPhone = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS);
+    if (!onPhone) {
+      _snack('Contacts work only in the phone app (Android or iPhone), not in Chrome.');
+      return;
+    }
+    try {
+      final ok = await FlutterContacts.requestPermission(readonly: true);
+      if (!ok) {
+        _snack('Contacts permission was denied. Allow it in your phone Settings.');
+        return;
+      }
+      final all = await FlutterContacts.getContacts();
+      final names = all
+          .map((c) => c.displayName.trim())
+          .where((n) => n.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      if (!mounted) return;
+      final g = store.current;
+      final picked = await showModalBottomSheet<List<String>>(
+        context: context,
+        isScrollControlled: true,
+        builder: (_) => _ContactPickerSheet(names: names, existing: g.members),
+      );
+      if (picked == null || picked.isEmpty) return;
+      var added = 0;
+      for (final n in picked) {
+        if (g.members.any((m) => m.toLowerCase() == n.toLowerCase())) continue;
+        g.members.add(n);
+        added++;
+      }
+      store.changed();
+      _snack('Added $added member(s) from contacts.');
+    } catch (_) {
+      _snack('Could not open contacts on this device.');
+    }
   }
 
   void _removeMember(String m) {
@@ -874,6 +1437,7 @@ class _ExpenseFormState extends State<ExpenseForm>
       payers: payers,
       mode: _mode,
       weights: weights,
+      receipt: _receipt,
     );
 
     if (_editingId != null) {
@@ -981,6 +1545,12 @@ class _ExpenseFormState extends State<ExpenseForm>
                       ),
                     ),
                     const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: 'Add from contacts',
+                      icon: const Icon(Icons.contacts),
+                      onPressed: _pickFromContacts,
+                    ),
+                    const SizedBox(width: 8),
                     FilledButton(
                       onPressed: _addMember,
                       child: const Text('Add'),
@@ -1025,7 +1595,10 @@ class _ExpenseFormState extends State<ExpenseForm>
               ChoiceChip(
                 label: Text(c),
                 selected: _category == c,
-                onSelected: (_) => setState(() => _category = c),
+                onSelected: (_) {
+                  bgPick(c);
+                  setState(() => _category = c);
+                },
               ),
           ],
         ),
@@ -1059,6 +1632,7 @@ class _ExpenseFormState extends State<ExpenseForm>
                 selected: _payers.containsKey(m),
                 onSelected: (sel) => setState(() {
                   if (sel) {
+                    bgPick(m);
                     _payers[m] = TextEditingController();
                   } else {
                     _payers.remove(m);
@@ -1087,9 +1661,9 @@ class _ExpenseFormState extends State<ExpenseForm>
                       decimal: true,
                     ),
                     onChanged: (_) => setState(() {}),
-                    decoration: const InputDecoration(
-                      labelText: 'Amount (Rs.)',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: 'Amount (${store.currency})',
+                      border: const OutlineInputBorder(),
                       isDense: true,
                     ),
                   ),
@@ -1138,6 +1712,7 @@ class _ExpenseFormState extends State<ExpenseForm>
                 selected: _parts.containsKey(m),
                 onSelected: (sel) => setState(() {
                   if (sel) {
+                    bgPick(m);
                     _parts[m] = TextEditingController();
                   } else {
                     _parts.remove(m);
@@ -1176,7 +1751,7 @@ class _ExpenseFormState extends State<ExpenseForm>
                       onChanged: (_) => setState(() {}),
                       decoration: InputDecoration(
                         labelText: _mode == SplitMode.exact
-                            ? 'Amount (Rs.)'
+                            ? 'Amount (${store.currency})'
                             : _mode == SplitMode.percent
                             ? 'Percent (%)'
                             : 'Shares',
@@ -1189,7 +1764,42 @@ class _ExpenseFormState extends State<ExpenseForm>
               ),
             ),
         _splitSummary(),
-        const SizedBox(height: 20),
+        const SizedBox(height: 12),
+
+        // ---- Receipt photo ----
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _receiptSheet,
+              icon: const Icon(Icons.receipt_long_outlined),
+              label: Text(
+                _receipt == null
+                    ? 'Attach receipt photo'
+                    : 'Change receipt photo',
+              ),
+            ),
+            if (_receipt != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(
+                  base64Decode(_receipt!),
+                  width: 48,
+                  height: 48,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Remove photo',
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() => _receipt = null),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 16),
 
         FilledButton.icon(
           onPressed: _save,
@@ -1224,6 +1834,53 @@ class HistoryTab extends StatefulWidget {
 
 class _HistoryTabState extends State<HistoryTab> {
   String? _filter; // category filter
+  String _query = '';
+  String? _person;
+  DateTimeRange? _range;
+  final TextEditingController _search = TextEditingController();
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  bool get _hasFilters =>
+      _filter != null ||
+      _person != null ||
+      _range != null ||
+      _query.trim().isNotEmpty;
+
+  bool _matches(Expense e) {
+    if (_filter != null && e.category != _filter) return false;
+    if (_person != null &&
+        !(e.payers.containsKey(_person) || e.weights.containsKey(_person))) {
+      return false;
+    }
+    if (_range != null) {
+      final d = DateTime(e.date.year, e.date.month, e.date.day);
+      if (d.isBefore(_range!.start) || d.isAfter(_range!.end)) return false;
+    }
+    final q = _query.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      final hay =
+          '${e.title} ${e.category} ${e.payers.keys.join(' ')} ${e.weights.keys.join(' ')}'
+              .toLowerCase();
+      if (!hay.contains(q)) return false;
+    }
+    return true;
+  }
+
+  Future<void> _pickRange() async {
+    final now = DateTime.now();
+    final r = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 5),
+      lastDate: DateTime(now.year + 1),
+      initialDateRange: _range,
+    );
+    if (r != null) setState(() => _range = r);
+  }
 
   void _deleteExpense(Group g, int index) {
     final removed = g.expenses.removeAt(index);
@@ -1263,6 +1920,35 @@ class _HistoryTabState extends State<HistoryTab> {
       );
   }
 
+  void _showReceipt(Expense e) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                'Receipt - ${e.title}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            Flexible(
+              child: InteractiveViewer(
+                child: Image.memory(base64Decode(e.receipt!)),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _expenseCard(Group g, int index) {
     final e = g.expenses[index];
     final shares = e.shares;
@@ -1288,6 +1974,12 @@ class _HistoryTabState extends State<HistoryTab> {
                     ),
                   ),
                 ),
+                if (e.receipt != null)
+                  IconButton(
+                    tooltip: 'View receipt',
+                    icon: const Icon(Icons.image_outlined),
+                    onPressed: () => _showReceipt(e),
+                  ),
                 IconButton(
                   tooltip: 'Edit',
                   icon: const Icon(Icons.edit_outlined),
@@ -1341,10 +2033,92 @@ class _HistoryTabState extends State<HistoryTab> {
     final g = store.current;
     final usedCats = g.expenses.map((e) => e.category).toSet();
     if (_filter != null && !usedCats.contains(_filter)) _filter = null;
+    if (_person != null && !g.members.contains(_person)) _person = null;
+    final shown = g.expenses.where(_matches).toList();
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        if (g.expenses.isNotEmpty) ...[
+          TextField(
+            controller: _search,
+            onChanged: (v) => setState(() => _query = v),
+            decoration: InputDecoration(
+              hintText: 'Search by title, category or person',
+              prefixIcon: const Icon(Icons.search),
+              border: const OutlineInputBorder(),
+              isDense: true,
+              suffixIcon: _query.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _search.clear();
+                        setState(() => _query = '');
+                      },
+                    ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (g.members.isNotEmpty)
+                DropdownButton<String?>(
+                  value: _person,
+                  hint: const Text('Everyone'),
+                  underline: const SizedBox.shrink(),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('Everyone'),
+                    ),
+                    for (final m in g.members)
+                      DropdownMenuItem<String?>(value: m, child: Text(m)),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) bgPick(v);
+                    setState(() => _person = v);
+                  },
+                ),
+              OutlinedButton.icon(
+                onPressed: _pickRange,
+                icon: const Icon(Icons.date_range),
+                label: Text(
+                  _range == null
+                      ? 'Dates'
+                      : '${fmtDate(_range!.start)} to ${fmtDate(_range!.end)}',
+                ),
+              ),
+              if (_hasFilters)
+                TextButton.icon(
+                  onPressed: () {
+                    bgPick(null);
+                    _search.clear();
+                    setState(() {
+                      _filter = null;
+                      _person = null;
+                      _range = null;
+                      _query = '';
+                    });
+                  },
+                  icon: const Icon(Icons.filter_alt_off_outlined),
+                  label: const Text('Clear'),
+                ),
+            ],
+          ),
+          if (_hasFilters)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Showing ${shown.length} of ${g.expenses.length}  •  total ${rs(shown.fold<double>(0.0, (s, e) => s + e.total))}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          const SizedBox(height: 8),
+        ],
         if (usedCats.length > 1)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
@@ -1355,13 +2129,19 @@ class _HistoryTabState extends State<HistoryTab> {
                 ChoiceChip(
                   label: const Text('All'),
                   selected: _filter == null,
-                  onSelected: (_) => setState(() => _filter = null),
+                  onSelected: (_) {
+                    bgPick(null);
+                    setState(() => _filter = null);
+                  },
                 ),
                 for (final c in categories.where(usedCats.contains))
                   ChoiceChip(
                     label: Text(c),
                     selected: _filter == c,
-                    onSelected: (_) => setState(() => _filter = c),
+                    onSelected: (_) {
+                      bgPick(c);
+                      setState(() => _filter = c);
+                    },
                   ),
               ],
             ),
@@ -1376,9 +2156,18 @@ class _HistoryTabState extends State<HistoryTab> {
               ),
             ),
           ),
+        if (g.expenses.isNotEmpty && shown.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 40),
+            child: Center(
+              child: Text(
+                'No expenses match your search or filters.',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+          ),
         for (int i = 0; i < g.expenses.length; i++)
-          if (_filter == null || g.expenses[i].category == _filter)
-            _expenseCard(g, i),
+          if (_matches(g.expenses[i])) _expenseCard(g, i),
         if (g.payments.isNotEmpty) ...[
           const SizedBox(height: 16),
           const Text(
@@ -1458,9 +2247,9 @@ class BalancesTab extends StatelessWidget {
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
-              decoration: const InputDecoration(
-                labelText: 'Amount paid now (Rs.)',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                labelText: 'Amount paid now (${store.currency})',
+                border: const OutlineInputBorder(),
               ),
               onSubmitted: (v) => Navigator.pop(ctx, parseNum(v)),
             ),
@@ -1665,42 +2454,766 @@ class BalancesTab extends StatelessWidget {
         ),
         const SizedBox(height: 16),
 
-        // ---- Spending by category ----
+        // ---- Spending by category (donut chart) ----
         if (cats.isNotEmpty) ...[
           const Text(
             'Spending by category',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
+          SizedBox(
+            height: 210,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(painter: _DonutPainter(cats, total)),
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Total', style: TextStyle(fontSize: 12)),
+                    Text(
+                      rs(total),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
           for (final c in cats)
             Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(c.key),
-                      Text(
-                        '${rs(c.value)}  (${(c.value / total * 100).toStringAsFixed(0)}%)',
+                  Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: bgColorFor(c.key),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(c.key)),
+                  Text(
+                    '${rs(c.value)}  (${total > 0 ? (c.value / total * 100).toStringAsFixed(0) : 0}%)',
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 16),
+          const Text(
+            'Last 6 months',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          _MonthlyBars(expenses: g.expenses),
+        ],
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+}
+
+// ============================================================
+//  Pick members from the phone's contact list
+// ============================================================
+
+class _ContactPickerSheet extends StatefulWidget {
+  final List<String> names;
+  final List<String> existing;
+  const _ContactPickerSheet({required this.names, required this.existing});
+
+  @override
+  State<_ContactPickerSheet> createState() => _ContactPickerSheetState();
+}
+
+class _ContactPickerSheetState extends State<_ContactPickerSheet> {
+  final Set<String> _chosen = {};
+  String _q = '';
+
+  bool _isIn(String n) =>
+      widget.existing.any((m) => m.toLowerCase() == n.toLowerCase());
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = widget.names
+        .where((n) => n.toLowerCase().contains(_q.toLowerCase()))
+        .toList();
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.8,
+          child: Column(
+            children: [
+              const SizedBox(height: 12),
+              const Text(
+                'Pick from contacts',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: TextField(
+                  onChanged: (v) => setState(() => _q = v),
+                  decoration: const InputDecoration(
+                    labelText: 'Search',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: shown.isEmpty
+                    ? const Center(child: Text('No contacts found'))
+                    : ListView.builder(
+                        itemCount: shown.length,
+                        itemBuilder: (_, i) {
+                          final n = shown[i];
+                          final already = _isIn(n);
+                          return CheckboxListTile(
+                            title: Text(n),
+                            subtitle:
+                                already ? const Text('Already in this group') : null,
+                            value: already || _chosen.contains(n),
+                            onChanged: already
+                                ? null
+                                : (v) => setState(() {
+                                      if (v == true) {
+                                        _chosen.add(n);
+                                      } else {
+                                        _chosen.remove(n);
+                                      }
+                                    }),
+                          );
+                        },
                       ),
-                    ],
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: _chosen.isEmpty
+                        ? null
+                        : () => Navigator.pop(context, _chosen.toList()),
+                    child: Text(
+                      _chosen.isEmpty
+                          ? 'Select contacts'
+                          : 'Add ${_chosen.length} member(s)',
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+//  Tab 4: Account (profile, settings, log out)
+// ============================================================
+
+class AccountTab extends StatelessWidget {
+  const AccountTab({super.key});
+
+  Future<void> _editName(BuildContext context, String current) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final ctl = TextEditingController(text: current);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit your name'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(
+            labelText: 'Name',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty) return;
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      await user?.updateDisplayName(newName);
+      await user?.reload();
+      store.changed();
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(content: Text('Name updated')));
+    } catch (_) {
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(content: Text('Could not update the name. Try again.')),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final user = FirebaseAuth.instance.currentUser;
+        final shownName = user?.displayName?.trim() ?? '';
+        final email = user?.email ?? '';
+        final name = shownName.isNotEmpty
+            ? shownName
+            : (email.isNotEmpty ? email.split('@').first : 'Guest');
+        final photo = user?.photoURL;
+        final letter = name.isNotEmpty ? name[0].toUpperCase() : '?';
+        final initial = Container(
+          color: Colors.teal,
+          alignment: Alignment.center,
+          child: Text(
+            letter,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        );
+
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    ClipOval(
+                      child: SizedBox(
+                        width: 64,
+                        height: 64,
+                        child: photo != null
+                            ? Image.network(
+                                photo,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => initial,
+                              )
+                            : initial,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          if (email.isNotEmpty) Text(email),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.dark_mode_outlined),
+                    title: const Text('Dark mode'),
+                    trailing: Switch(
+                      value: store.dark,
+                      onChanged: (v) {
+                        store.dark = v;
+                        store.changed();
+                      },
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.groups_outlined),
+                    title: const Text('Groups'),
+                    trailing: Text('${store.groups.length}'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.edit_outlined),
+                    title: const Text('Edit name'),
+                    subtitle: Text(name),
+                    onTap: () => _editName(context, shownName),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.payments_outlined),
+                    title: const Text('Currency'),
+                    trailing: DropdownButton<String>(
+                      value: currencies.contains(store.currency)
+                          ? store.currency
+                          : currencies.first,
+                      underline: const SizedBox.shrink(),
+                      items: [
+                        for (final c in currencies)
+                          DropdownMenuItem(value: c, child: Text(c)),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        store.currency = v;
+                        store.changed();
+                      },
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.badge_outlined),
+                    title: const Text('My name in groups'),
+                    subtitle: store.allMembers.isEmpty
+                        ? const Text('Add members first')
+                        : null,
+                    trailing: store.allMembers.isEmpty
+                        ? null
+                        : DropdownButton<String>(
+                            value: store.me,
+                            hint: const Text('Choose'),
+                            underline: const SizedBox.shrink(),
+                            items: [
+                              for (final m in store.allMembers)
+                                DropdownMenuItem(value: m, child: Text(m)),
+                            ],
+                            onChanged: (v) {
+                              if (v == null) return;
+                              store.myName = v;
+                              store.changed();
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.logout, color: Colors.teal),
+                title: const Text('Log out', style: TextStyle(color: Colors.teal)),
+                onTap: () => signOut(),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ============================================================
+//  Charts (donut + monthly bars) - drawn by hand, no package
+// ============================================================
+
+class _DonutPainter extends CustomPainter {
+  final List<MapEntry<String, double>> data;
+  final double total;
+  _DonutPainter(this.data, this.total);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (total <= 0) return;
+    final side = min(size.width, size.height);
+    final stroke = side * 0.2;
+    final rect = Rect.fromCenter(
+      center: size.center(Offset.zero),
+      width: side - stroke - 8,
+      height: side - stroke - 8,
+    );
+    var start = -pi / 2;
+    for (final e in data) {
+      final sweep = 2 * pi * e.value / total;
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = stroke
+        ..color = bgColorFor(e.key);
+      canvas.drawArc(rect, start, max(sweep - 0.03, 0.001), false, paint);
+      start += sweep;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DonutPainter old) => true;
+}
+
+class _MonthlyBars extends StatelessWidget {
+  final List<Expense> expenses;
+  const _MonthlyBars({required this.expenses});
+
+  static const _names = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final months = [
+      for (var i = 5; i >= 0; i--) DateTime(now.year, now.month - i),
+    ];
+    final sums = <double>[
+      for (final m in months)
+        expenses
+            .where((e) => e.date.year == m.year && e.date.month == m.month)
+            .fold<double>(0.0, (s, e) => s + e.total),
+    ];
+    final maxV = sums.fold<double>(0.0, (a, b) => max(a, b));
+    return SizedBox(
+      height: 170,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          for (var i = 0; i < months.length; i++)
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    sums[i] > 0 ? _plain(sums[i]) : '',
+                    style: const TextStyle(fontSize: 10),
+                  ),
+                  const SizedBox(height: 2),
+                  Container(
+                    height: maxV > 0 ? max(3.0, 120.0 * sums[i] / maxV) : 3.0,
+                    margin: const EdgeInsets.symmetric(horizontal: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.teal,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
                   ),
                   const SizedBox(height: 4),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: total > 0 ? c.value / total : 0,
-                      minHeight: 10,
-                    ),
+                  Text(
+                    _names[months[i].month - 1],
+                    style: const TextStyle(fontSize: 12),
                   ),
                 ],
               ),
             ),
         ],
-        const SizedBox(height: 24),
-      ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+//  Tab 4: Friends (what you owe / are owed across all groups)
+// ============================================================
+
+class FriendsTab extends StatelessWidget {
+  const FriendsTab({super.key});
+
+  Future<void> _setReminder(BuildContext context, String friend) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(days: 3)),
+      firstDate: now,
+      lastDate: DateTime(now.year + 2),
+    );
+    if (picked == null) return;
+    store.reminders.add(Reminder(id: newId(), friend: friend, due: picked));
+    store.changed();
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(content: Text('Reminder set for ${fmtDate(picked)}')),
+      );
+  }
+
+  void _remind(BuildContext context, String friend, double amount) {
+    final text =
+        'Hi $friend, a friendly reminder that you owe me ${rs(amount)} on Splitwise Pro. Thanks!';
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('Reminder copied. Paste it into WhatsApp or SMS.'),
+        ),
+      );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final me = store.me;
+        if (me == null) {
+          final names = store.allMembers;
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              const SizedBox(height: 24),
+              const Text(
+                'Which member are you?',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Pick your name so we can show what you owe each friend.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              if (names.isEmpty)
+                const Text(
+                  'Add members in the Add tab first.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey),
+                )
+              else
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final n in names)
+                      ActionChip(
+                        label: Text(n),
+                        onPressed: () {
+                          store.myName = n;
+                          store.changed();
+                        },
+                      ),
+                  ],
+                ),
+            ],
+          );
+        }
+
+        // friend -> list of (group name, amount). Positive = friend owes you.
+        final perFriend = <String, List<MapEntry<String, double>>>{};
+        for (final g in store.groups) {
+          for (final t in g.settlements()) {
+            if (t.from == me) {
+              perFriend
+                  .putIfAbsent(t.to, () => [])
+                  .add(MapEntry(g.name, -t.amount));
+            } else if (t.to == me) {
+              perFriend
+                  .putIfAbsent(t.from, () => [])
+                  .add(MapEntry(g.name, t.amount));
+            }
+          }
+        }
+        final totals = <MapEntry<String, double>>[
+          for (final e in perFriend.entries)
+            MapEntry(e.key, e.value.fold<double>(0.0, (s, x) => s + x.value)),
+        ].where((e) => e.value.abs() >= 0.01).toList()
+          ..sort((a, b) => b.value.compareTo(a.value));
+
+        final owedToMe = totals
+            .where((e) => e.value > 0)
+            .fold<double>(0.0, (s, e) => s + e.value);
+        final iOwe = totals
+            .where((e) => e.value < 0)
+            .fold<double>(0.0, (s, e) => s - e.value);
+
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Card(
+              elevation: 4,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hi $me - across all your groups',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'You are owed ${rs(owedToMe)}',
+                      style: TextStyle(
+                        color: Colors.green.shade600,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      'You owe ${rs(iOwe)}',
+                      style: TextStyle(
+                        color: Colors.red.shade400,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Not you? Change it in the Account tab.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (store.reminders.isNotEmpty) ...[
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                        child: Text(
+                          'Reminders',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      for (final r in ([...store.reminders]
+                        ..sort((a, b) => a.due.compareTo(b.due))))
+                        Builder(
+                          builder: (_) {
+                            final owed = store.friendTotal(r.friend);
+                            final due = r.isDue;
+                            return ListTile(
+                              leading: Icon(
+                                due
+                                    ? Icons.notifications_active
+                                    : Icons.schedule,
+                                color: due ? Colors.red.shade400 : null,
+                              ),
+                              title: Text(r.friend),
+                              subtitle: Text(
+                                '${due ? 'Due' : 'On'} ${fmtDate(r.due)}'
+                                '${owed > 0.01 ? '  •  owes you ${rs(owed)}' : '  •  nothing owed now'}',
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (owed > 0.01)
+                                    IconButton(
+                                      tooltip: 'Copy reminder message',
+                                      icon: const Icon(Icons.copy_outlined),
+                                      onPressed: () =>
+                                          _remind(context, r.friend, owed),
+                                    ),
+                                  IconButton(
+                                    tooltip: 'Delete reminder',
+                                    icon: const Icon(Icons.delete_outline),
+                                    onPressed: () {
+                                      store.reminders
+                                          .removeWhere((x) => x.id == r.id);
+                                      store.changed();
+                                    },
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            if (totals.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Text(
+                    'All settled up across your groups. 🎉',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              ),
+            for (final f in totals)
+              Card(
+                child: ExpansionTile(
+                  leading: CircleAvatar(
+                    backgroundColor: bgColorFor(f.key),
+                    child: Text(
+                      f.key.isNotEmpty ? f.key[0].toUpperCase() : '?',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  title: Text(f.key),
+                  subtitle: Text(
+                    f.value > 0
+                        ? 'owes you ${rs(f.value)}'
+                        : 'you owe ${rs(-f.value)}',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: f.value > 0
+                          ? Colors.green.shade600
+                          : Colors.red.shade400,
+                    ),
+                  ),
+                  children: [
+                    for (final x in perFriend[f.key] ?? <MapEntry<String, double>>[])
+                      ListTile(
+                        dense: true,
+                        title: Text(x.key),
+                        trailing: Text(
+                          x.value > 0 ? '+${rs(x.value)}' : '-${rs(-x.value)}',
+                        ),
+                      ),
+                    if (f.value > 0)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 8, bottom: 8),
+                          child: Wrap(
+                            spacing: 4,
+                            children: [
+                              TextButton.icon(
+                                onPressed: () =>
+                                    _remind(context, f.key, f.value),
+                                icon: const Icon(Icons.copy_outlined),
+                                label: const Text('Copy message'),
+                              ),
+                              TextButton.icon(
+                                onPressed: () => _setReminder(context, f.key),
+                                icon: const Icon(Icons.event_outlined),
+                                label: const Text('Remind me on...'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 24),
+          ],
+        );
+      },
     );
   }
 }
